@@ -66,8 +66,36 @@ unregister_name(Name, Pid) ->
 start_guard(Name) ->
     %% Set up a callback to be triggered on a single node (lasp handles this)
     %% when the number of pids registered for this name goes above 1
-    EnforceFun = fun(AwSet) -> deactivate_dups(Name, AwSet) end,
+    EnforceFun =
+        case erlang:function_exported(twin_grain, is_location_right, 1) of
+            true ->
+                fun(AwSet) -> deactivate_dups_twin(Name, AwSet) end;
+            false ->
+                fun(AwSet) -> deactivate_dups(Name, AwSet) end
+        end,
     lasp:enforce_once({term_to_binary(Name), ?SET}, {strict, {cardinality, 1}}, EnforceFun).
+
+deactivate_dups_twin(_Name, AwSet) ->
+    Set = state_awset:query(AwSet),
+    Size = sets:size(Set),
+    sets:fold(
+        fun(Pid, {true, N}) ->
+                terminate_grain(Pid),
+                {true, N+1};
+           (_Pid, {false, N}) when N =:= Size ->
+                {true, N+1};
+           (Pid, {false, N}) ->
+                case twin_grain:is_location_right(Pid) of
+                    true ->
+                        {true, N+1};
+                    false ->
+                        terminate_grain(Pid),
+                        {false, N+1};
+                    noproc ->
+                        {false, N+1}
+                end
+        end,
+        {false, 1}, Set).
 
 %% deactivate all but a random activation.
 %% It is possible that this will be triggered multiple times and result in no
@@ -78,11 +106,14 @@ deactivate_dups(Name, AwSet) ->
     Keep = rand:uniform(Size),
     ?LOG_INFO("at=deactivate_dups name=~p size=~p keep=~p", [Name, Size, Keep]),
     sets:fold(fun(_, N) when N =:= Size ->
-        N+1;
-        (Pid, N) ->
-            supervisor:terminate_child({erleans_grain_sup, node(Pid)}, Pid),
-            N+1
+                  N+1;
+                 (Pid, N) ->
+                  terminate_grain(Pid),
+                  N+1
               end, 1, Set).
+
+terminate_grain(Pid) ->
+    supervisor:terminate_child({erleans_grain_sup, node(Pid)}, Pid).
 
 -spec stop_guard(Guard :: pid() | undefined) -> ok | undefined | {error, any()}.
 stop_guard(Guard) when is_pid(Guard) ->
