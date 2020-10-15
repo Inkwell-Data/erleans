@@ -67,7 +67,7 @@ start_guard(Name) ->
     %% Set up a callback to be triggered on a single node (lasp handles this)
     %% when the number of pids registered for this name goes above 1
     EnforceFun =
-        case erlang:function_exported(twin_grain, is_location_right, 1) of
+        case erlang:function_exported(twin_service_grain, is_location_right, 1) of
             true ->
                 fun(AwSet) -> deactivate_dups_twin(Name, AwSet) end;
             false ->
@@ -80,17 +80,17 @@ deactivate_dups_twin(_Name, AwSet) ->
     Size = sets:size(Set),
     sets:fold(
         fun(Pid, {true, N}) ->
-                twin_grain:mark_as_duplicate(Pid),
+                twin_service_grain:mark_as_duplicate(Pid),
                 terminate_grain(Pid),
                 {true, N+1};
            (_Pid, {false, N}) when N =:= Size ->
                 {true, N+1};
            (Pid, {false, N}) ->
-                case twin_grain:is_location_right(Pid) of
+                case twin_service_grain:is_location_right(Pid) of
                     true ->
                         {true, N+1};
                     false ->
-                        twin_grain:mark_as_duplicate(Pid),
+                        twin_service_grain:mark_as_duplicate(Pid),
                         terminate_grain(Pid),
                         {false, N+1};
                     noproc ->

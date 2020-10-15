@@ -422,7 +422,9 @@ maybe_unregister(GrainRef) ->
 upd_timer(leave_timer, _) ->
     [];
 upd_timer(refresh_timer, DeactivateAfter) ->
-    [{state_timeout, DeactivateAfter, activation_expiry}].
+    [{state_timeout, DeactivateAfter, activation_expiry}];
+upd_timer(cancel_timer, _) ->
+    [{state_timeout, cancel}].
 
 %% If a recoverable stop (meaning we are stopping because the activation expired)
 %% first cancel timers and wait until all currently running callbacks have completed
