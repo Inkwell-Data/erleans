@@ -123,7 +123,7 @@ call(GrainRef, Request, Timeout) ->
     ReqType = req_type(),
     do_for_ref(GrainRef, fun(_, Pid) ->
                                  try
-                                     gen_statem:call(Pid, {otel:current_span_ctx(), ReqType, Request}, Timeout)
+                                     gen_statem:call(Pid, {otel_tracer:current_span_ctx(opentelemetry:get_tracer()), ReqType, Request}, Timeout)
                                  catch
                                      exit:{bad_etag, _} ->
                                          ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
@@ -134,7 +134,7 @@ call(GrainRef, Request, Timeout) ->
 -spec cast(GrainRef :: erleans:grain_ref(), Request :: term()) -> Reply :: term().
 cast(GrainRef, Request) ->
     ReqType = req_type(),
-    do_for_ref(GrainRef, fun(_, Pid) -> gen_statem:cast(Pid, {otel:current_span_ctx(), ReqType, Request}) end).
+    do_for_ref(GrainRef, fun(_, Pid) -> gen_statem:cast(Pid, {otel_tracer:current_span_ctx(opentelemetry:get_tracer()), ReqType, Request}) end).
 
 req_type() ->
     case get(req_type) of
@@ -319,11 +319,11 @@ active({call, From}, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
 active({call, From}, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                          cb_state=CbData,
                                                          deactivate_after=DeactivateAfter}) ->
-    otel:start_span(span_name(Msg), #{parent => SpanCtx}),
-    otel:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
+    otel_tracer:start_span(opentelemetry:get_tracer(), span_name(Msg), #{parent => SpanCtx}),
+    otel_tracer:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
     try handle_result(CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter))
     after
-        otel:end_span()
+        otel_tracer:end_span(opentelemetry:get_tracer())
     end;
 active(cast, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                    cb_state=CbData,
@@ -332,11 +332,11 @@ active(cast, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
 active(cast, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                  cb_state=CbData,
                                                  deactivate_after=DeactivateAfter}) ->
-    otel:start_span(span_name(Msg), #{parent => SpanCtx}),
-    otel:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
+    otel_tracer:start_span(opentelemetry:get_tracer(), span_name(Msg), #{parent => SpanCtx}),
+    otel_tracer:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
     try handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter))
     after
-        otel:end_span()
+        otel_tracer:end_span(opentelemetry:get_tracer())
     end;
 active(state_timeout, activation_expiry, Data) ->
     {next_state, deactivating, Data};
