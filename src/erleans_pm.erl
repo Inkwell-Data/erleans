@@ -80,7 +80,6 @@ deactivate_dups_twin(_Name, AwSet) ->
     Size = sets:size(Set),
     sets:fold(
         fun(Pid, {true, N}) ->
-                twin_service_grain:mark_as_duplicate(Pid),
                 terminate_grain(Pid),
                 {true, N+1};
            (_Pid, {false, N}) when N =:= Size ->
@@ -90,7 +89,6 @@ deactivate_dups_twin(_Name, AwSet) ->
                     true ->
                         {true, N+1};
                     false ->
-                        twin_service_grain:mark_as_duplicate(Pid),
                         terminate_grain(Pid),
                         {false, N+1};
                     noproc ->
