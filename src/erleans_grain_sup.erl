@@ -49,5 +49,5 @@ init([]) ->
     ChildSpecs = [#{id => erleans_grain,
                     start => {erleans_grain, start_link, []},
                     restart => temporary,
-                    shutdown => 5000}],
+                    shutdown => infinity}],
     {ok, {SupFlags, ChildSpecs}}.
