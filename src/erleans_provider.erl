@@ -40,12 +40,14 @@
 -callback update(Type :: module(), ProviderName :: atom(), Id :: any(), State :: any(),
                   ETag :: erleans:etag(), NewETag :: erleans:etag()) ->
     ok |
+    {ok, NewState :: any()} |
     {error, {bad_etag, erleans:etag(), erleans:etag()}} |
     {error, any()}.
 
 -callback update(Type :: module(), ProviderName :: atom(), Id :: any(), Hash :: integer(),
                   State :: any(), ETag :: erleans:etag(), NewETag :: erleans:etag()) ->
     ok |
+    {ok, NewState :: any()} |
     {error, {bad_etag, erleans:etag(), erleans:etag()}} |
     {error, any()}.
 

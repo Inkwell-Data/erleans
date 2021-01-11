@@ -445,11 +445,13 @@ finalize_and_stop(Data=#data{cb_module=CbModule,
 
     case erleans_utils:fun_or_default(CbModule, deactivate, 1, [CbData], {ok, CbData}) of
         {save_state, NewCbData={_, PersistentState}} ->
-            NewETag = update_state(CbModule, Provider, Id, PersistentState, ETag),
+            %% We ignore the returned NewPersistentState
+            {NewETag, _} = update_state(CbModule, Provider, Id, PersistentState, ETag),
             {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData,
                                                       etag=NewETag}};
         {save_state, NewCbData} ->
-            NewETag = update_state(CbModule, Provider, Id, NewCbData, ETag),
+            %% We ignore the returned NewPersistentState
+            {NewETag, _} = update_state(CbModule, Provider, Id, NewCbData, ETag),
             {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData,
                                                       etag=NewETag}};
         {ok, NewCbData} ->
@@ -478,8 +480,15 @@ handle_actions([{info, Msg} | Rest], ActionsAcc, CbData, Data) ->
 handle_actions([R={reply, _, _} | Rest], ActionsAcc, CbData, Data) ->
     handle_actions(Rest, [R | ActionsAcc], CbData, Data);
 handle_actions([save_state | Rest], ActionsAcc, CbData, Data) ->
-    NewETag = update_state(CbData, Data),
-    handle_actions(Rest, ActionsAcc, CbData, Data#data{etag=NewETag});
+    {NewETag, NewState} = update_state(CbData, Data),
+    NewCbData = case CbData of
+        {Ephimeral, _} ->
+            {Ephimeral, NewState};
+        CbData ->
+            NewState
+    end,
+    handle_actions(Rest, ActionsAcc, CbData, Data#data{cb_state=NewCbData,
+                                                       etag=NewETag});
 handle_actions([A | _Rest], _ActionsAcc, _CbData, _Data) ->
     %% unknown action, exit with reason bad_action
     exit({bad_action, A}).
@@ -501,7 +510,9 @@ update_state(CbModule, Provider, Id, CbData, ETag) ->
 update_state(CbModule, {Provider, ProviderName}, Id, Data, ETag, NewETag) ->
     case Provider:update(CbModule, ProviderName, Id, Data, ETag, NewETag) of
         ok ->
-            NewETag;
+            {NewETag, Data};
+        {ok, NewState} ->
+            {etag(NewState), NewState};
         {error, Reason} ->
             exit(Reason)
     end.
