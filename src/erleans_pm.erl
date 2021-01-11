@@ -134,14 +134,25 @@ whereis_name(GrainRef) ->
             case lasp_pg:members(GrainRef) of
                 {ok, Set} ->
                     case sets:to_list(Set) of
-                        [Pid | _] ->
-                            Pid;
+                        Pids when is_list(Pids) ->
+                            first_alive(Pids);
                         _ ->
                             undefined
                     end;
                 _ ->
                     undefined
             end
+    end.
+
+%% @private
+first_alive([]) ->
+    undefined;
+first_alive([Pid | Pids]) ->
+    case erlang:is_process_alive(Pid) of
+        true ->
+            Pid;
+        false ->
+            first_alive(Pids)
     end.
 
 -spec send(Name :: term(), Message :: term()) -> pid().
