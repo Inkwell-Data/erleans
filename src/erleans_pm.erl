@@ -148,10 +148,11 @@ whereis_name(GrainRef) ->
 first_alive([]) ->
     undefined;
 first_alive([Pid | Pids]) ->
-    case erlang:is_process_alive(Pid) of
+    case rpc:call(node(Pid), erlang, is_process_alive, [Pid]) of
         true ->
             Pid;
-        false ->
+        _ ->
+            %%false or {badrpc, _}
             first_alive(Pids)
     end.
 
