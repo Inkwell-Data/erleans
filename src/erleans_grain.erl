@@ -479,6 +479,8 @@ handle_actions([{info, Msg} | Rest], ActionsAcc, CbData, Data) ->
     handle_actions(Rest, [{next_event, info, {leave_timer, Msg}} | ActionsAcc], CbData, Data);
 handle_actions([R={reply, _, _} | Rest], ActionsAcc, CbData, Data) ->
     handle_actions(Rest, [R | ActionsAcc], CbData, Data);
+handle_actions([hibernate | Rest], ActionsAcc, CbData, Data) ->
+    handle_actions(Rest, [hibernate | ActionsAcc], CbData, Data);
 handle_actions([save_state | Rest], ActionsAcc, CbData, Data) ->
     {NewETag, NewState} = update_state(CbData, Data),
     NewCbData = case CbData of
