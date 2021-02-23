@@ -230,17 +230,18 @@ init(Parent, GrainRef) ->
                     proc_lib:init_ack(Parent, {error, {already_started, Pid}});
                 {_, _Pid} ->
                     %%no error handling to keep original behavior
-                    case erleans_pm:register_name(GrainRef, Self) of
-                        yes ->
-                            case erleans_pm:start_guard(GrainRef) of
-                                {ok, Guard} ->
-                                    put(?GUARD, Guard);
-                                _Error ->
-                                    _Error
-                            end;
-                        _Error ->
-                            _Error
-                    end,
+%%                    case erleans_pm:register_name(GrainRef, Self) of
+%%                        yes ->
+%%                            case erleans_pm:start_guard(GrainRef) of
+%%                                {ok, Guard} ->
+%%                                    put(?GUARD, Guard);
+%%                                _Error ->
+%%                                    _Error
+%%                            end;
+%%                        _Error ->
+%%                            _Error
+%%                    end,
+                    erleans_pm:register_name(GrainRef, Self),
                     init_(Parent, GrainRef)
             end
     end.
@@ -417,7 +418,7 @@ maybe_unregister(#{placement := {stateless, _}}) ->
     ok;
 maybe_unregister(GrainRef) ->
     erleans_pm:unregister_name(GrainRef, self()),
-    erleans_pm:stop_guard(get(?GUARD)),
+%%    erleans_pm:stop_guard(get(?GUARD)),
     gproc:unreg(?stateful(GrainRef)).
 
 upd_timer(leave_timer, _) ->
