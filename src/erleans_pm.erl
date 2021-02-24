@@ -23,9 +23,10 @@
 -export([register_name/2,
          unregister_name/1,
          unregister_name/2,
-         %%start_guard/1,
-         %%stop_guard/1,
          whereis_name/1,
+         add/2,
+         remove/2,
+         term_dups/2,
          send/2]).
 
 -include("erleans.hrl").
@@ -34,16 +35,11 @@
 -dialyzer({nowarn_function, register_name/2}).
 -dialyzer({nowarn_function, unregister_name/2}).
 
+-define(TOMBSTONE, '$deleted').
+
 -spec register_name(Name :: term(), Pid :: pid()) -> yes | no.
-%%register_name(Name, Pid) when is_pid(Pid) ->
-%%    case lasp_pg:join(Name, Pid, true) of
-%%        {ok, _} ->
-%%            yes;
-%%        _ ->
-%%            no
-%%    end.
-register_name(Name, Pid) when is_pid(Pid) ->
-    case plum_db:put({?MODULE, grain_ref}, Name, Pid) of
+register_name(GrainRef, Pid) when is_pid(Pid) ->
+    case add(GrainRef, Pid) of
         ok -> yes;
         _ -> no
     end.
@@ -57,78 +53,41 @@ unregister_name(Name) ->
             undefined
     end.
 
-
 -spec unregister_name(Name :: term(), Pid :: pid()) -> Name :: term() | fail.
-unregister_name(Name, _Pid) ->
-    case plum_db:delete({?MODULE, grain_ref}, Name) of
+unregister_name(GrainRef, Pid) ->
+    case remove(GrainRef, Pid) of
         ok ->
-            Name;
+            GrainRef;
         _ ->
             fail
     end.
 
-%%deactivate_dups_twin(_Name, AwSet) ->
-%%    Set = state_awset:query(AwSet),
-%%    Size = sets:size(Set),
-%%    sets:fold(
-%%        fun(Pid, {true, N}) ->
-%%                terminate_grain(Pid),
-%%                {true, N+1};
-%%           (_Pid, {false, N}) when N =:= Size ->
-%%                {true, N+1};
-%%           (Pid, {false, N}) ->
-%%                case twin_service_grain:is_location_right(Pid) of
-%%                    true ->
-%%                        {true, N+1};
-%%                    false ->
-%%                        terminate_grain(Pid),
-%%                        {false, N+1};
-%%                    noproc ->
-%%                        {false, N+1}
-%%                end
-%%        end,
-%%        {false, 1}, Set).
+term_dups(GrainRef, List) ->
+    Fun = fun(Pid, {1, undefined}) ->
+                {0, Pid};
+             (Pid, {Rem, undefined}) ->
+                case twin_service_grain:is_location_right(Pid) of
+                    true ->
+                        Pid;
+                    false ->
+                        terminate_grain(Pid),
+                        remove(GrainRef, Pid),
+                        {Rem - 1, undefined};
+                    noproc ->
+                        {Rem - 1, undefined}
+                end;
+             (Pid, {Rem, Selected}) ->
+                terminate_grain(Pid),
+                remove(GrainRef, Pid),
+                {Rem - 1, Selected}
+          end,
+    {_, Pid} = lists:foldl(Fun, {length(List), undefined}, List),
+    Pid.
 
-%% deactivate all but a random activation.
-%% It is possible that this will be triggered multiple times and result in no
-%% remaining activations until the next request to a grain.
-%%deactivate_dups(Name, AwSet) ->
-%%    Set = state_awset:query(AwSet),
-%%    Size = sets:size(Set),
-%%    Keep = rand:uniform(Size),
-%%    ?LOG_INFO("at=deactivate_dups name=~p size=~p keep=~p", [Name, Size, Keep]),
-%%    sets:fold(fun(_, N) when N =:= Size ->
-%%                  N+1;
-%%                 (Pid, N) ->
-%%                  terminate_grain(Pid),
-%%                  N+1
-%%              end, 1, Set).
-
-%%terminate_grain(Pid) ->
-%%    supervisor:terminate_child({erleans_grain_sup, node(Pid)}, Pid).
+terminate_grain(Pid) ->
+    supervisor:terminate_child({erleans_grain_sup, node(Pid)}, Pid).
 
 -spec whereis_name(GrainRef :: erleans:grain_ref()) -> pid() | undefined.
-%%whereis_name(GrainRef=#{placement := stateless}) ->
-%%    whereis_stateless(GrainRef);
-%%whereis_name(GrainRef=#{placement := {stateless, _}}) ->
-%%    whereis_stateless(GrainRef);
-%%whereis_name(GrainRef) ->
-%%    case gproc:where(?stateful(GrainRef)) of
-%%        Pid when is_pid(Pid) ->
-%%            Pid;
-%%        _ ->
-%%            case lasp_pg:members(GrainRef) of
-%%                {ok, Set} ->
-%%                    case sets:to_list(Set) of
-%%                        Pids when is_list(Pids) ->
-%%                            first_alive(Pids);
-%%                        _ ->
-%%                            undefined
-%%                    end;
-%%                _ ->
-%%                    undefined
-%%            end
-%%    end.
 whereis_name(GrainRef=#{placement := stateless}) ->
     whereis_stateless(GrainRef);
 whereis_name(GrainRef=#{placement := {stateless, _}}) ->
@@ -138,20 +97,13 @@ whereis_name(GrainRef) ->
         Pid when is_pid(Pid) ->
             Pid;
         _ ->
-            plum_db:get({?MODULE, grain_ref}, GrainRef)
+            case plum_db:get({?MODULE, grain_ref}, GrainRef, [{resolver, fun resolve/2}]) of
+                Pids when is_list(Pids) ->
+                    term_dups(GrainRef, Pids);
+                undefined ->
+                    undefined
+            end
     end.
-
-%% @private
-%%first_alive([]) ->
-%%    undefined;
-%%first_alive([Pid | Pids]) ->
-%%    case rpc:call(node(Pid), erlang, is_process_alive, [Pid]) of
-%%        true ->
-%%            Pid;
-%%        _ ->
-%%            %%false or {badrpc, _}
-%%            first_alive(Pids)
-%%    end.
 
 -spec send(Name :: term(), Message :: term()) -> pid().
 send(Name, Message) ->
@@ -169,3 +121,44 @@ whereis_stateless(GrainRef) ->
         Pid ->
             Pid
     end.
+
+add(GrainRef, Pid) ->
+    Fun =
+    fun(undefined) ->
+         [Pid];
+       ([?TOMBSTONE]) ->
+         [Pid];
+       ([Pids]) ->
+         lists:usort(Pids ++ [Pid]);
+       (Vs) ->
+         lists:usort(resolve(Vs) ++ [Pid])
+    end,
+    plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
+
+remove(GrainRef, Pid) ->
+    Fun =
+    fun([?TOMBSTONE]) ->
+          ?TOMBSTONE;
+       ([[P]]) when P == Pid ->
+          ?TOMBSTONE;
+       ([Pids]) ->
+          case Pids -- [Pid] of
+            [] ->
+                ?TOMBSTONE;
+            V -> V
+          end;
+       (Vs) ->
+          case lists:umerge(Vs) of
+              [Pid] ->
+                  ?TOMBSTONE;
+              Pids ->
+                  Pids -- [Pid]
+          end
+    end,
+    plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
+
+resolve(L1, L2) ->
+    resolve([L1, L2]).
+
+resolve(L) ->
+    lists:umerge(L).
