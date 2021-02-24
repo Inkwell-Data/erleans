@@ -26,7 +26,7 @@
          whereis_name/1,
          add/2,
          remove/2,
-         term_dups/2,
+         terminate_duplicates/2,
          send/2]).
 
 -include("erleans.hrl").
@@ -62,24 +62,34 @@ unregister_name(GrainRef, Pid) ->
             fail
     end.
 
-term_dups(GrainRef, List) ->
+terminate_duplicates(GrainRef, List) ->
+    %% TODO: make terminate async
     Fun = fun(Pid, {1, undefined}) ->
+                %% keep the last one as non of them replied true
                 {0, Pid};
              (Pid, {Rem, undefined}) ->
+                %% checks if grain activation is co-located with
+                %% the Kafka partition, won't cause a loop or an activation
+                %% because below call is not an erleans_grain:call/2,3
                 case twin_service_grain:is_location_right(Pid) of
                     true ->
                         Pid;
                     false ->
+                        %% terminate the grain as we still have at least
+                        %% one more in the list to check
                         terminate_grain(Pid),
                         remove(GrainRef, Pid),
                         {Rem - 1, undefined};
                     noproc ->
+                        %% grain activation deactivated, or
+                        %% some other process terminated it
                         {Rem - 1, undefined}
                 end;
-             (Pid, {Rem, Selected}) ->
+             (Pid, {Rem, Keep}) ->
+                %% we already have the one to keep, so we terminate the rest
                 terminate_grain(Pid),
                 remove(GrainRef, Pid),
-                {Rem - 1, Selected}
+                {Rem - 1, Keep}
           end,
     {_, Pid} = lists:foldl(Fun, {length(List), undefined}, List),
     Pid.
@@ -99,7 +109,7 @@ whereis_name(GrainRef) ->
         _ ->
             case plum_db:get({?MODULE, grain_ref}, GrainRef, [{resolver, fun resolve/2}]) of
                 Pids when is_list(Pids) ->
-                    term_dups(GrainRef, Pids);
+                    terminate_duplicates(GrainRef, Pids);
                 undefined ->
                     undefined
             end
@@ -142,13 +152,9 @@ remove(GrainRef, Pid) ->
        ([[P]]) when P == Pid ->
           ?TOMBSTONE;
        ([Pids]) ->
-          case Pids -- [Pid] of
-            [] ->
-                ?TOMBSTONE;
-            V -> V
-          end;
+          Pids -- [Pid];
        (Vs) ->
-          case lists:umerge(Vs) of
+          case resolve(Vs) of
               [Pid] ->
                   ?TOMBSTONE;
               Pids ->
