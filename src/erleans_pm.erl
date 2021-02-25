@@ -27,6 +27,7 @@
          add/2,
          remove/2,
          terminate_duplicates/2,
+         terminator/2,
          send/2]).
 
 -include("erleans.hrl").
@@ -62,8 +63,8 @@ unregister_name(GrainRef, Pid) ->
             fail
     end.
 
+%% @private
 terminate_duplicates(GrainRef, List) ->
-    %% TODO: make terminate async
     Fun = fun(Pid, {1, undefined}) ->
                 %% keep the last one as non of them replied true
                 {0, Pid};
@@ -77,8 +78,7 @@ terminate_duplicates(GrainRef, List) ->
                     false ->
                         %% terminate the grain as we still have at least
                         %% one more in the list to check
-                        terminate_grain(Pid),
-                        remove(GrainRef, Pid),
+                        terminate(GrainRef, Pid),
                         {Rem - 1, undefined};
                     noproc ->
                         %% grain activation deactivated, or
@@ -87,15 +87,21 @@ terminate_duplicates(GrainRef, List) ->
                 end;
              (Pid, {Rem, Keep}) ->
                 %% we already have the one to keep, so we terminate the rest
-                terminate_grain(Pid),
-                remove(GrainRef, Pid),
+                terminate(GrainRef, Pid),
                 {Rem - 1, Keep}
           end,
     {_, Pid} = lists:foldl(Fun, {length(List), undefined}, List),
     Pid.
 
-terminate_grain(Pid) ->
-    supervisor:terminate_child({erleans_grain_sup, node(Pid)}, Pid).
+%% @private
+terminate(GrainRef, Pid) ->
+    %% spawn a terminator on the same node where the grain activation is
+    spawn(node(Pid), ?MODULE, terminator, [GrainRef, Pid]).
+
+-spec terminator(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
+terminator(GrainRef, Pid) ->
+    supervisor:terminate_child({erleans_grain_sup, node()}, Pid),
+    remove(GrainRef, Pid).
 
 -spec whereis_name(GrainRef :: erleans:grain_ref()) -> pid() | undefined.
 whereis_name(GrainRef=#{placement := stateless}) ->
@@ -124,6 +130,7 @@ send(Name, Message) ->
             error({badarg, Name})
     end.
 
+%% @private
 whereis_stateless(GrainRef) ->
     case gproc_pool:pick_worker(GrainRef) of
         false ->
@@ -132,6 +139,7 @@ whereis_stateless(GrainRef) ->
             Pid
     end.
 
+-spec add(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
 add(GrainRef, Pid) ->
     Fun =
     fun(undefined) ->
@@ -145,6 +153,7 @@ add(GrainRef, Pid) ->
     end,
     plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
 
+-spec remove(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
 remove(GrainRef, Pid) ->
     Fun =
     fun([?TOMBSTONE]) ->
@@ -163,8 +172,10 @@ remove(GrainRef, Pid) ->
     end,
     plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
 
+%% @private
 resolve(L1, L2) ->
     resolve([L1, L2]).
 
+%% @private
 resolve(L) ->
     lists:umerge(L).
