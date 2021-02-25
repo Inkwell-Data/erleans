@@ -74,7 +74,8 @@ terminate_duplicates(GrainRef, List) ->
                 %% because below call is not an erleans_grain:call/2,3
                 case twin_service_grain:is_location_right(Pid) of
                     true ->
-                        Pid;
+                        %% this process will be selected
+                        {Rem - 1, Pid};
                     false ->
                         %% terminate the grain as we still have at least
                         %% one more in the list to check
@@ -83,6 +84,7 @@ terminate_duplicates(GrainRef, List) ->
                     noproc ->
                         %% grain activation deactivated, or
                         %% some other process terminated it
+                        remove(GrainRef, Pid),
                         {Rem - 1, undefined}
                 end;
              (Pid, {Rem, Keep}) ->
