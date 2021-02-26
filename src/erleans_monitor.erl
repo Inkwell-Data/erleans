@@ -21,17 +21,21 @@ start_link() ->
     case ets:info(?TAB, name) of
         undefined ->
             ets:new(?TAB, [bag, public, named_table,
-                {write_concurrency, true},
-                {read_concurrency, true}]);
+                           {write_concurrency, true},
+                           {read_concurrency, true}]);
         _ ->
             ok
     end,
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+-spec monitor(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> ok.
 monitor(GrainRef, Pid) ->
     _ = ets:insert(?TAB, {Pid, GrainRef}),
     gen_server:cast(?MODULE, {monitor_me, Pid}).
 
+-spec demonitor(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> true.
 demonitor(GrainRef, Pid) ->
     ets:delete_object(?TAB, {Pid, GrainRef}).
 
@@ -57,15 +61,13 @@ code_change(_OldVsn, State, _Extra) ->
 terminate(_Reason, _State) ->
     ok.
 
-%% Internal functions
-
+%% @private
 process_down(Pid) when is_pid(Pid) ->
     [begin
          unregister_name(Name, Pid),
          ets:delete(?TAB, Pid)
      end || {_, Name} <- ets:lookup(?TAB, Pid)].
 
-
--spec unregister_name(Name :: term(), Pid :: pid()) -> term().
-unregister_name(Name, Pid) ->
-    erleans_pm:plum_db_remove(Name, Pid).
+%% @private
+unregister_name(GrainRef, Pid) ->
+    erleans_pm:plum_db_remove(GrainRef, Pid).
