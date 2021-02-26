@@ -46,8 +46,11 @@
         -> yes | no.
 register_name(GrainRef, Pid) when is_pid(Pid) ->
     case plum_db_add(GrainRef, Pid) of
-        ok -> yes;
-        _ -> no
+        ok ->
+            erleans_monitor:monitor(GrainRef, Pid),
+            yes;
+        _ ->
+            no
     end.
 
 -spec unregister_name(GrainRef :: erleans:grain_ref())
@@ -65,6 +68,7 @@ unregister_name(GrainRef) ->
 unregister_name(GrainRef, Pid) ->
     case plum_db_remove(GrainRef, Pid) of
         ok ->
+            erleans_monitor:demonitor(GrainRef, Pid),
             GrainRef;
         _ ->
             fail
@@ -179,7 +183,7 @@ plum_db_remove(GrainRef, Pid) ->
     end,
     plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
 
--spec get(GrainRef :: erleans:grain_ref()) -> list(pid()) | undefined.
+-spec plum_db_get(GrainRef :: erleans:grain_ref()) -> list(pid()) | undefined.
 plum_db_get(GrainRef) ->
     plum_db:get({?MODULE, grain_ref}, GrainRef, [{resolver, fun resolve/2}]).
 
