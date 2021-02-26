@@ -20,15 +20,19 @@
 %%% ---------------------------------------------------------------------------
 -module(erleans_pm).
 
+%% called by erleans
 -export([register_name/2,
          unregister_name/1,
          unregister_name/2,
-         whereis_name/1,
-         add/2,
-         remove/2,
-         terminate_duplicates/2,
-         terminator/2,
-         send/2]).
+         whereis_name/1]).
+
+%% called by this module via spawning
+-export([terminator/2]).
+
+%% only for manual testing or OAM
+-export([plum_db_add/2,
+         plum_db_remove/2,
+         plum_db_get/1]).
 
 -include("erleans.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -38,25 +42,28 @@
 
 -define(TOMBSTONE, '$deleted').
 
--spec register_name(Name :: term(), Pid :: pid()) -> yes | no.
+-spec register_name(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> yes | no.
 register_name(GrainRef, Pid) when is_pid(Pid) ->
-    case add(GrainRef, Pid) of
+    case plum_db_add(GrainRef, Pid) of
         ok -> yes;
         _ -> no
     end.
 
--spec unregister_name(Name :: term()) -> Name :: term() | fail.
-unregister_name(Name) ->
-    case ?MODULE:whereis_name(Name) of
+-spec unregister_name(GrainRef :: erleans:grain_ref())
+        -> GrainRef :: erleans:grain_ref() | fail.
+unregister_name(GrainRef) ->
+    case ?MODULE:whereis_name(GrainRef) of
         Pid when is_pid(Pid) ->
-            unregister_name(Name, Pid);
+            unregister_name(GrainRef, Pid);
         undefined ->
             undefined
     end.
 
--spec unregister_name(Name :: term(), Pid :: pid()) -> Name :: term() | fail.
+-spec unregister_name(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> GrainRef :: erleans:grain_ref() | fail.
 unregister_name(GrainRef, Pid) ->
-    case remove(GrainRef, Pid) of
+    case plum_db_remove(GrainRef, Pid) of
         ok ->
             GrainRef;
         _ ->
@@ -64,9 +71,9 @@ unregister_name(GrainRef, Pid) ->
     end.
 
 %% @private
-terminate_duplicates(GrainRef, List) ->
+terminate_duplicates(GrainRef, Pids) ->
     Fun = fun(Pid, {1, undefined}) ->
-                %% keep the last one as non of them replied true
+                %% keep the last one as non of them replied true before
                 {0, Pid};
              (Pid, {Rem, undefined}) ->
                 %% checks if grain activation is co-located with
@@ -84,7 +91,7 @@ terminate_duplicates(GrainRef, List) ->
                     noproc ->
                         %% grain activation deactivated, or
                         %% some other process terminated it
-                        remove(GrainRef, Pid),
+                        plum_db_remove(GrainRef, Pid),
                         {Rem - 1, undefined}
                 end;
              (Pid, {Rem, Keep}) ->
@@ -92,7 +99,7 @@ terminate_duplicates(GrainRef, List) ->
                 terminate(GrainRef, Pid),
                 {Rem - 1, Keep}
           end,
-    {_, Pid} = lists:foldl(Fun, {length(List), undefined}, List),
+    {_, Pid} = lists:foldl(Fun, {length(Pids), undefined}, Pids),
     Pid.
 
 %% @private
@@ -100,12 +107,14 @@ terminate(GrainRef, Pid) ->
     %% spawn a terminator on the same node where the grain activation is
     spawn(node(Pid), ?MODULE, terminator, [GrainRef, Pid]).
 
--spec terminator(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
+-spec terminator(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> ok.
 terminator(GrainRef, Pid) ->
     supervisor:terminate_child({erleans_grain_sup, node()}, Pid),
-    remove(GrainRef, Pid).
+    plum_db_remove(GrainRef, Pid).
 
--spec whereis_name(GrainRef :: erleans:grain_ref()) -> pid() | undefined.
+-spec whereis_name(GrainRef :: erleans:grain_ref())
+        -> pid() | undefined.
 whereis_name(GrainRef=#{placement := stateless}) ->
     whereis_stateless(GrainRef);
 whereis_name(GrainRef=#{placement := {stateless, _}}) ->
@@ -115,21 +124,14 @@ whereis_name(GrainRef) ->
         Pid when is_pid(Pid) ->
             Pid;
         _ ->
-            case plum_db:get({?MODULE, grain_ref}, GrainRef, [{resolver, fun resolve/2}]) of
-                Pids when is_list(Pids) ->
-                    terminate_duplicates(GrainRef, Pids);
+            case plum_db_get(GrainRef) of
+                [Pid] ->
+                    Pid;
                 undefined ->
-                    undefined
+                    undefined;
+                Pids when is_list(Pids) ->
+                    terminate_duplicates(GrainRef, Pids)
             end
-    end.
-
--spec send(Name :: term(), Message :: term()) -> pid().
-send(Name, Message) ->
-    case whereis_name(Name) of
-        Pid when is_pid(Pid) ->
-            Pid ! Message;
-        undefined ->
-            error({badarg, Name})
     end.
 
 %% @private
@@ -141,8 +143,9 @@ whereis_stateless(GrainRef) ->
             Pid
     end.
 
--spec add(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
-add(GrainRef, Pid) ->
+-spec plum_db_add(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> ok.
+plum_db_add(GrainRef, Pid) ->
     Fun =
     fun(undefined) ->
          [Pid];
@@ -155,10 +158,12 @@ add(GrainRef, Pid) ->
     end,
     plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
 
--spec remove(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
-remove(GrainRef, Pid) ->
+-spec plum_db_remove(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
+plum_db_remove(GrainRef, Pid) ->
     Fun =
-    fun([?TOMBSTONE]) ->
+    fun(undefined) ->
+          ?TOMBSTONE;
+       ([?TOMBSTONE]) ->
           ?TOMBSTONE;
        ([[P]]) when P == Pid ->
           ?TOMBSTONE;
@@ -173,6 +178,10 @@ remove(GrainRef, Pid) ->
           end
     end,
     plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
+
+-spec get(GrainRef :: erleans:grain_ref()) -> list(pid()) | undefined.
+plum_db_get(GrainRef) ->
+    plum_db:get({?MODULE, grain_ref}, GrainRef, [{resolver, fun resolve/2}]).
 
 %% @private
 resolve(L1, L2) ->
