@@ -19,9 +19,11 @@
 %%% @end
 %%% ---------------------------------------------------------------------------
 -module(erleans_pm).
+-behavior(gen_server).
 
 %% called by erleans
--export([register_name/2,
+-export([start_link/0,
+         register_name/2,
          unregister_name/1,
          unregister_name/2,
          whereis_name/1]).
@@ -33,6 +35,13 @@
 -export([plum_db_add/2,
          plum_db_remove/2,
          plum_db_get/1]).
+
+%% gen_server callbacks to handle plum_db events
+-export([init/1]).
+-export([handle_call/3]).
+-export([handle_cast/2]).
+-export([handle_info/2]).
+-export([terminate/2]).
 
 -include("erleans.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -90,7 +99,7 @@ terminate_duplicates(GrainRef, Pids) ->
                     false ->
                         %% terminate the grain as we still have at least
                         %% one more in the list to check
-                        terminate(GrainRef, Pid),
+                        terminate_grain(GrainRef, Pid),
                         {Rem - 1, undefined};
                     noproc ->
                         %% grain activation deactivated, or
@@ -100,14 +109,14 @@ terminate_duplicates(GrainRef, Pids) ->
                 end;
              (Pid, {Rem, Keep}) ->
                 %% we already have the one to keep, so we terminate the rest
-                terminate(GrainRef, Pid),
+                terminate_grain(GrainRef, Pid),
                 {Rem - 1, Keep}
           end,
     {_, Pid} = lists:foldl(Fun, {length(Pids), undefined}, Pids),
     Pid.
 
 %% @private
-terminate(GrainRef, Pid) ->
+terminate_grain(GrainRef, Pid) ->
     %% spawn a terminator on the same node where the grain activation is
     spawn(node(Pid), ?MODULE, terminator, [GrainRef, Pid]).
 
@@ -129,12 +138,10 @@ whereis_name(GrainRef) ->
             Pid;
         _ ->
             case plum_db_get(GrainRef) of
-                [Pid] ->
+                [Pid | _] ->
                     Pid;
                 undefined ->
-                    undefined;
-                Pids when is_list(Pids) ->
-                    terminate_duplicates(GrainRef, Pids)
+                    undefined
             end
     end.
 
@@ -194,3 +201,62 @@ resolve(L1, L2) ->
 %% @private
 resolve(L) ->
     lists:umerge(L).
+
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, _Args = #{}, []).
+
+%% =============================================================================
+%% GEN_SERVER BEHAVIOR CALLBACKS
+%% =============================================================================
+
+-spec init(Args :: term()) ->
+    {ok, State :: term()}.
+
+init(#{} = _Args) ->
+    MS = [{
+        %% {{{_, _} = FullPrefix, Key}, NewObj, ExistingObj}
+        {{{erleans_pm, grain_ref}, '_'}, '_', '_'},
+        [],
+        [true]
+    }],
+    ok = plum_db_events:subscribe(object_update, MS),
+    {ok, _State = #{}}.
+
+-spec handle_call(Request :: term(), From :: {pid(),
+    Tag :: term()}, State :: term()) ->
+    {reply, Reply :: term(), NewState :: term()}.
+
+handle_call(_Request, _From, State) ->
+    {reply, ok, State}.
+
+-spec handle_cast(Request :: term(), State :: term()) ->
+    {noreply, NewState :: term()}.
+
+handle_cast(_Request, State) ->
+    {noreply, State}.
+
+-spec handle_info(Message :: term(), State :: term()) ->
+    {noreply, NewState :: term()}.
+
+handle_info(
+    {plum_db_event, object_update, {{{_, _}, GrainRef}, Obj, PrevObj}},
+    State) ->
+    logger:debug(#{
+        message => "plum_db_event object_update received",
+        object => Obj,
+        prev_obj => PrevObj}),
+    case plum_db_object:value_count(Obj) > 1 of
+        true ->
+            Pids = plum_db_object:values(Obj),
+            _Pid = terminate_duplicates(GrainRef, Pids);
+        false ->
+            undefined
+    end,
+    {noreply, State}.
+
+-spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
+    State :: term()) ->
+    term().
+
+terminate(_Reason, _State) ->
+    ok.
