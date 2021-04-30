@@ -245,14 +245,22 @@ handle_info(
         message => "plum_db_event object_update received",
         object => Obj,
         prev_obj => PrevObj}),
-    case plum_db_object:value_count(Obj) > 1 of
-        true ->
-            Pids = plum_db_object:values(Obj),
+    ResolvedObj = maybe_resolve(Obj),
+    case plum_db_object:value(ResolvedObj) of
+        Pids when is_list(Pids), length(Pids) > 1 ->
             _Pid = terminate_duplicates(GrainRef, Pids);
-        false ->
-            undefined
+        _ ->
+            ok
     end,
     {noreply, State}.
+
+maybe_resolve(Obj) ->
+    case plum_db_object:value_count(Obj) > 1 of
+        true ->
+            plum_db_object:resolve(Obj, fun resolve/2);
+        false ->
+            Obj
+    end.
 
 -spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
     State :: term()) ->
