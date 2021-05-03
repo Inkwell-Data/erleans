@@ -195,6 +195,10 @@ plum_db_get(GrainRef) ->
     plum_db:get({?MODULE, grain_ref}, GrainRef, [{resolver, fun resolve/2}]).
 
 %% @private
+resolve(?TOMBSTONE, L2) ->
+    resolve([?TOMBSTONE], L2);
+resolve(L1, ?TOMBSTONE) ->
+    resolve(L1, [?TOMBSTONE]);
 resolve(L1, L2) ->
     resolve([L1, L2]).
 
