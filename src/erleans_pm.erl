@@ -157,54 +157,41 @@ whereis_stateless(GrainRef) ->
 -spec plum_db_add(GrainRef :: erleans:grain_ref(), Pid :: pid())
         -> ok.
 plum_db_add(GrainRef, Pid) ->
-    Fun =
-    fun(undefined) ->
-         [Pid];
-       ([?TOMBSTONE]) ->
-         [Pid];
-       ([Pids]) ->
-         lists:usort(Pids ++ [Pid]);
-       (Vs) ->
-         lists:usort(resolve(Vs) ++ [Pid])
-    end,
-    plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
+    PKey = {?MODULE, grain_ref},
+    case plum_db:get(PKey, GrainRef) of
+        undefined ->
+            plum_db:put(PKey, GrainRef, [Pid]);
+        [] ->
+            plum_db:put(PKey, GrainRef, [Pid]);
+        Pids ->
+            plum_db:delete(PKey, GrainRef, Pids ++ [Pid])
+    end.
+
+
 
 -spec plum_db_remove(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
 plum_db_remove(GrainRef, Pid) ->
-    Fun =
-    fun(undefined) ->
-          ?TOMBSTONE;
-       ([?TOMBSTONE]) ->
-          ?TOMBSTONE;
-       ([[P]]) when P == Pid ->
-          ?TOMBSTONE;
-       ([Pids]) ->
-          Pids -- [Pid];
-       (Vs) ->
-          case resolve(Vs) of
-              [Pid] ->
-                  ?TOMBSTONE;
-              Pids ->
-                  Pids -- [Pid]
-          end
-    end,
-    plum_db:put({?MODULE, grain_ref}, GrainRef, Fun).
+    PKey = {?MODULE, grain_ref},
+    case plum_db:get(PKey, GrainRef) of
+        undefined ->
+            ok;
+        [] ->
+            ok;
+        Pids ->
+            case Pids -- [Pid] of
+                [] ->
+                    plum_db:delete(PKey, GrainRef);
+                NewPids ->
+                    plum_db:delete(PKey, GrainRef, NewPids)
+            end
+    end.
+
 
 -spec plum_db_get(GrainRef :: erleans:grain_ref()) -> list(pid()) | undefined.
 plum_db_get(GrainRef) ->
-    plum_db:get({?MODULE, grain_ref}, GrainRef, [{resolver, fun resolve/2}]).
+    plum_db:get({?MODULE, grain_ref}, GrainRef).
 
-%% @private
-resolve(?TOMBSTONE, L2) ->
-    resolve([?TOMBSTONE], L2);
-resolve(L1, ?TOMBSTONE) ->
-    resolve(L1, [?TOMBSTONE]);
-resolve(L1, L2) ->
-    resolve([L1, L2]).
 
-%% @private
-resolve(L) ->
-    lists:umerge(L).
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, _Args = #{}, []).
@@ -248,23 +235,17 @@ handle_info(
     logger:debug(#{
         message => "plum_db_event object_update received",
         object => Obj,
-        prev_obj => PrevObj}),
-    ResolvedObj = maybe_resolve(Obj),
-    case plum_db_object:value(ResolvedObj) of
+        prev_obj => PrevObj
+    }),
+
+    case plum_db_object:value(plum_db_object:resolve(Obj, lww)) of
+        '$deleted' ->
+            ok;
         Pids when is_list(Pids), length(Pids) > 1 ->
-            _Pid = terminate_duplicates(GrainRef, Pids);
-        _ ->
-            ok
+            _Pid = terminate_duplicates(GrainRef, Pids)
     end,
     {noreply, State}.
 
-maybe_resolve(Obj) ->
-    case plum_db_object:value_count(Obj) > 1 of
-        true ->
-            plum_db_object:resolve(Obj, fun resolve/2);
-        false ->
-            Obj
-    end.
 
 -spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
     State :: term()) ->
