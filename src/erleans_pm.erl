@@ -21,6 +21,7 @@
 -module(erleans_pm).
 -behavior(gen_server).
 
+
 %% called by erleans
 -export([start_link/0,
          register_name/2,
@@ -165,47 +166,81 @@ whereis_stateless(GrainRef) ->
             Pid
     end.
 
--spec plum_db_add(GrainRef :: erleans:grain_ref(), Pid :: pid())
-        -> ok.
+
+
+
+-spec plum_db_add(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
+
 plum_db_add(GrainRef, Pid) ->
     PKey = {?MODULE, grain_ref},
-    case plum_db:get(PKey, GrainRef) of
+    Opts = [
+        {resolver, fun resolver/2},
+        {allow_put, false} % We will manually put as we need to add Pid
+    ],
+
+    case plum_db:get(PKey, GrainRef, Opts) of
         undefined ->
             plum_db:put(PKey, GrainRef, [Pid]);
         [] ->
             plum_db:put(PKey, GrainRef, [Pid]);
-        Pids ->
-            plum_db:delete(PKey, GrainRef, Pids ++ [Pid])
+        Pids when is_list(Pids) ->
+            plum_db:put(PKey, GrainRef, lists:usort(Pids ++ [Pid]))
     end.
 
 
 
 -spec plum_db_remove(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
+
 plum_db_remove(GrainRef, Pid) ->
     PKey = {?MODULE, grain_ref},
-    case plum_db:get(PKey, GrainRef) of
+    Opts = [
+        {resolver, fun resolver/2},
+        {allow_put, false} % We will manually put as we need to remove Pid
+    ],
+    case plum_db:get(PKey, GrainRef, Opts) of
         undefined ->
             ok;
         [] ->
             ok;
-        Pids ->
+        Pids when is_list(Pids) ->
             case Pids -- [Pid] of
                 [] ->
                     plum_db:delete(PKey, GrainRef);
                 NewPids ->
-                    plum_db:delete(PKey, GrainRef, NewPids)
+                    plum_db:put(PKey, GrainRef, lists:usort(NewPids))
             end
     end.
 
 
 -spec plum_db_get(GrainRef :: erleans:grain_ref()) -> list(pid()) | undefined.
+
 plum_db_get(GrainRef) ->
-    plum_db:get({?MODULE, grain_ref}, GrainRef).
+    Opts = [
+        {resolver, fun resolver/2},
+        {allow_put, true} % This will make a put to store the resolved value
+    ],
+    plum_db:get({?MODULE, grain_ref}, GrainRef, Opts).
+
+
+
+%% @private
+resolver('$deleted', L) ->
+    L;
+resolver(L, '$deleted') ->
+    L;
+resolver(L1, L2) when is_list(L1) andalso is_list(L2) ->
+    %% Lists are sorted already as we sort them every time we put
+    lists:filter(
+        fun(Pid) -> is_process_alive(Pid) end,
+        lists:umerge(L1, L2)
+    ).
 
 
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, _Args = #{}, []).
+
+
 
 %% =============================================================================
 %% GEN_SERVER BEHAVIOR CALLBACKS
