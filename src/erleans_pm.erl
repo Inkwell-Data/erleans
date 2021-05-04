@@ -134,16 +134,30 @@ whereis_name(GrainRef=#{placement := stateless}) ->
 whereis_name(GrainRef=#{placement := {stateless, _}}) ->
     whereis_stateless(GrainRef);
 whereis_name(GrainRef) ->
-    case gproc:where(?stateful(GrainRef)) of
+    case gproc_lookup(GrainRef) of
         Pid when is_pid(Pid) ->
             Pid;
-        _ ->
+        undefined ->
             case plum_db_get(GrainRef) of
                 Pids when is_list(Pids) ->
                     pick_first_alive(Pids);
                 undefined ->
                     undefined
             end
+    end.
+
+%% @private
+gproc_lookup(GrainRef) ->
+    case gproc:where(?stateful(GrainRef)) of
+        Pid when is_pid(Pid) ->
+            case erlang:is_process_alive(Pid) of
+                true ->
+                    Pid;
+                false ->
+                    undefined
+            end;
+        _ ->
+            undefined
     end.
 
 %% @private
