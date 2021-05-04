@@ -545,6 +545,6 @@ span_name(Msg) ->
 
 %% if state is {error, _} we crash the grain
 maybe_crash({error, Reason}) ->
-    error(Reason);
+    exit(Reason);
 maybe_crash(_) ->
     ok.
