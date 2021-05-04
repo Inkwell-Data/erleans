@@ -301,6 +301,8 @@ handle_info(
     case plum_db_object:value(plum_db_object:resolve(Obj, lww)) of
         '$deleted' ->
             ok;
+        [_] ->
+            ok;
         Pids when is_list(Pids), length(Pids) > 1 ->
             _Pid = terminate_duplicates(GrainRef, Pids)
     end,
