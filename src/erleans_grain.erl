@@ -316,10 +316,12 @@ active(enter, _OldState, Data=#data{deactivate_after=DeactivateAfter}) ->
 active({call, From}, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                            cb_state=CbData,
                                                            deactivate_after=DeactivateAfter}) ->
+    maybe_crash(CbData),
     handle_result(CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter));
 active({call, From}, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                          cb_state=CbData,
                                                          deactivate_after=DeactivateAfter}) ->
+    maybe_crash(CbData),
     otel:start_span(span_name(Msg), #{parent => SpanCtx}),
     otel:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
     try handle_result(CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter))
@@ -329,10 +331,12 @@ active({call, From}, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
 active(cast, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                    cb_state=CbData,
                                                    deactivate_after=DeactivateAfter}) ->
+    maybe_crash(CbData),
     handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter));
 active(cast, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                  cb_state=CbData,
                                                  deactivate_after=DeactivateAfter}) ->
+    maybe_crash(CbData),
     otel:start_span(span_name(Msg), #{parent => SpanCtx}),
     otel:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
     try handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter))
@@ -538,3 +542,9 @@ span_name(Msg) when is_tuple(Msg) ->
     element(1, Msg);
 span_name(Msg) ->
     Msg.
+
+%% if state is {error, _} we crash the grain
+maybe_crash({error, Reason}) ->
+    error(Reason);
+maybe_crash(_) ->
+    ok.
