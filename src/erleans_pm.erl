@@ -138,11 +138,22 @@ whereis_name(GrainRef) ->
             Pid;
         _ ->
             case plum_db_get(GrainRef) of
-                [Pid | _] ->
-                    Pid;
+                Pids when is_list(Pids) ->
+                    pick_first_alive(Pids);
                 undefined ->
                     undefined
             end
+    end.
+
+%% @private
+pick_first_alive([]) ->
+    undefined;
+pick_first_alive([Pid | Pids]) ->
+    case erlang:is_process_alive(Pid) of
+        true ->
+            Pid;
+        false ->
+            pick_first_alive(Pids)
     end.
 
 %% @private
