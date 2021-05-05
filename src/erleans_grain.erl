@@ -277,8 +277,10 @@ init_(Parent, GrainRef=#{id := Id,
                     %% activate returning {error, notfound} is given special treatment and
                     %% results in an ignore from the statem and an `exit({noproc, notfound})`
                     %% from `erleans_grain`
+                    erleans_pm:unregister_name(get(grain_ref), self()),
                     proc_lib:init_ack(Parent, ignore);
                 {error, Reason} ->
+                    erleans_pm:unregister_name(get(grain_ref), self()),
                     proc_lib:init_ack(Parent, {error, Reason})
             end
     end.
