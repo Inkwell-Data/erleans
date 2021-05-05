@@ -238,17 +238,27 @@ plum_db_get(GrainRef) ->
 
 
 %% @private
-resolver('$deleted', L) ->
-    L;
-resolver(L, '$deleted') ->
-    L;
+resolver(?TOMBSTONE, ?TOMBSTONE) ->
+    ?TOMBSTONE;
+resolver(?TOMBSTONE, L) ->
+    remove_dead(L);
+resolver(L, ?TOMBSTONE) ->
+    remove_dead(L);
 resolver(L1, L2) when is_list(L1) andalso is_list(L2) ->
     %% Lists are sorted already as we sort them every time we put
-    lists:filter(
-        fun(Pid) -> is_process_alive(Pid) end,
-        lists:umerge(L1, L2)
-    ).
+    remove_dead(lists:umerge(L1, L2)).
 
+%% @private
+remove_dead(Pids) ->
+    Filtered = lists:filter(
+        fun(Pid) -> is_process_alive(Pid) end, Pids
+    ),
+    case Filtered of
+        [] ->
+            ?TOMBSTONE;
+        V ->
+            V
+    end.
 
 
 start_link() ->
@@ -299,15 +309,17 @@ handle_info(
     }),
 
     case plum_db_object:value(plum_db_object:resolve(Obj, lww)) of
-        '$deleted' ->
-            ok;
-        [_] ->
+        ?TOMBSTONE ->
             ok;
         Pids when is_list(Pids), length(Pids) > 1 ->
-            _Pid = terminate_duplicates(GrainRef, Pids)
+            _Pid = terminate_duplicates(GrainRef, Pids);
+        _ ->
+            ok
     end,
-    {noreply, State}.
+    {noreply, State};
 
+handle_info(_, State) ->
+    {noreply, State}.
 
 -spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
     State :: term()) ->
