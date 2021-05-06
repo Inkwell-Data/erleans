@@ -238,28 +238,27 @@ plum_db_get(GrainRef) ->
 
 
 %% @private
-resolver(?TOMBSTONE, ?TOMBSTONE) ->
-    ?TOMBSTONE;
 resolver(?TOMBSTONE, L) ->
-    remove_dead(L);
+    maybe_tombstone(remove_dead(L));
 resolver(L, ?TOMBSTONE) ->
-    remove_dead(L);
+    maybe_tombstone(remove_dead(L));
 resolver(L1, L2) when is_list(L1) andalso is_list(L2) ->
     %% Lists are sorted already as we sort them every time we put
-    remove_dead(lists:umerge(L1, L2)).
+    maybe_tombstone(
+        remove_dead(lists:umerge(L1, L2))
+    ).
 
 %% @private
 remove_dead(Pids) ->
-    Filtered = lists:filter(
+    lists:filter(
         fun(Pid) -> is_process_alive(Pid) end, Pids
-    ),
-    case Filtered of
-        [] ->
-            ?TOMBSTONE;
-        V ->
-            V
-    end.
+    ).
 
+%% @private
+maybe_tombstone([]) ->
+    ?TOMBSTONE;
+maybe_tombstone(L) ->
+    L.
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, _Args = #{}, []).
@@ -309,10 +308,12 @@ handle_info(
     }),
 
     case plum_db_object:value(plum_db_object:resolve(Obj, lww)) of
-        ?TOMBSTONE ->
-            ok;
         Pids when is_list(Pids), length(Pids) > 1 ->
-            _Pid = terminate_duplicates(GrainRef, Pids);
+            %% we need to remove dead processes first to avoid the case when we
+            %% kill one that returns false in the belief that there's at least
+            %% one remaining but that could actually be dead already
+            PidsAlive = remove_dead(Pids),
+            _Pid = terminate_duplicates(GrainRef, PidsAlive);
         _ ->
             ok
     end,
