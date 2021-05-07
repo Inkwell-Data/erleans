@@ -164,7 +164,7 @@ gproc_lookup(GrainRef) ->
 pick_first_alive([]) ->
     undefined;
 pick_first_alive([Pid | Pids]) ->
-    case erlang:is_process_alive(Pid) of
+    case is_proc_alive(Pid) of
         true ->
             Pid;
         false ->
@@ -251,8 +251,23 @@ resolver(L1, L2) when is_list(L1) andalso is_list(L2) ->
 %% @private
 remove_dead(Pids) ->
     lists:filter(
-        fun(Pid) -> is_process_alive(Pid) end, Pids
+        fun(Pid) -> is_proc_alive(Pid) end, Pids
     ).
+
+is_proc_alive(Pid) ->
+    MyNode = node(),
+    case node(Pid) of
+        MyNode ->
+            is_process_alive(Pid);
+        Node ->
+            case rpc:call(Node, erlang, is_process_alive, [Pid], 5000) of
+                {badrpc, _Reason} ->
+                    %% Reason can be nodedown, timeout, etc.
+                    false;
+                Result ->
+                    Result
+            end
+    end.
 
 %% @private
 maybe_tombstone([]) ->
