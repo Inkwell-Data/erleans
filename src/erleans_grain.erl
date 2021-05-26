@@ -387,7 +387,9 @@ handle_event(_, Message, _, Data=#data{cb_module=CbModule,
 code_change(_OldVsn, State, Data, _Extra) ->
     {ok, State, Data}.
 
-terminate({shutdown, deactivated}, _State, #data{ref=GrainRef}) ->
+terminate({shutdown, Reason}, _State, #data{ref=GrainRef})
+        when Reason == deactivated;
+             Reason == committed_suicide ->
     maybe_remove_worker(GrainRef),
     ok;
 terminate(?NO_PROVIDER_ERROR, _State, #data{cb_module=CbModule,
@@ -474,7 +476,9 @@ handle_result({deactivate, NewCbData}, Data, _) ->
     {next_state, deactivating, Data#data{cb_state=NewCbData}, []};
 handle_result({deactivate, NewCbData, CbActions}, Data, _) ->
     {Actions1, Data1} = handle_actions(CbActions, [], NewCbData, Data),
-    {next_state, deactivating, Data1#data{cb_state=NewCbData}, Actions1}.
+    {next_state, deactivating, Data1#data{cb_state=NewCbData}, Actions1};
+handle_result({commit_suicide, Replies}, _Data, _Actions) ->
+    {stop_and_reply, {shutdown, committed_suicide}, Replies}.
 
 %% Drops unrecognized actions and converts cast actions to next_events that
 %% do not reset the activation timer
