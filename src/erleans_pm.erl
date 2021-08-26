@@ -238,6 +238,8 @@ plum_db_get(GrainRef) ->
 
 
 %% @private
+resolver(?TOMBSTONE, ?TOMBSTONE) ->
+    ?TOMBSTONE;
 resolver(?TOMBSTONE, L) ->
     maybe_tombstone(remove_dead(L));
 resolver(L, ?TOMBSTONE) ->
