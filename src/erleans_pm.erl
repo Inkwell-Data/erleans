@@ -19,152 +19,159 @@
 %%% @end
 %%% ---------------------------------------------------------------------------
 -module(erleans_pm).
+-behavior(gen_server).
 
--export([register_name/2,
+
+%% called by erleans
+-export([start_link/0,
+         register_name/2,
          unregister_name/1,
          unregister_name/2,
-         start_guard/1,
-         stop_guard/1,
-         whereis_name/1,
-         send/2]).
+         whereis_name/1]).
+
+%% called by this module via spawning
+-export([terminator/2]).
+
+%% only for manual testing or OAM
+-export([plum_db_add/2,
+         plum_db_remove/2,
+         plum_db_get/1]).
+
+%% gen_server callbacks to handle plum_db events
+-export([init/1]).
+-export([handle_call/3]).
+-export([handle_cast/2]).
+-export([handle_info/2]).
+-export([terminate/2]).
 
 -include("erleans.hrl").
--include_lib("lasp_pg/include/lasp_pg.hrl").
 -include_lib("kernel/include/logger.hrl").
 
 -dialyzer({nowarn_function, register_name/2}).
 -dialyzer({nowarn_function, unregister_name/2}).
 
--spec register_name(Name :: term(), Pid :: pid()) -> yes | no.
-register_name(Name, Pid) when is_pid(Pid) ->
-    case lasp_pg:join(Name, Pid, true) of
-        {ok, _} ->
+-define(TOMBSTONE, '$deleted').
+
+-spec register_name(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> yes | no.
+register_name(GrainRef, Pid) when is_pid(Pid) ->
+    case plum_db_add(GrainRef, Pid) of
+        ok ->
+            erleans_monitor:monitor(GrainRef, Pid),
             yes;
         _ ->
             no
     end.
 
--spec unregister_name(Name :: term()) -> Name :: term() | fail.
-unregister_name(Name) ->
-    case ?MODULE:whereis_name(Name) of
+-spec unregister_name(GrainRef :: erleans:grain_ref())
+        -> GrainRef :: erleans:grain_ref() | fail.
+unregister_name(GrainRef) ->
+    case ?MODULE:whereis_name(GrainRef) of
         Pid when is_pid(Pid) ->
-            unregister_name(Name, Pid);
+            unregister_name(GrainRef, Pid);
         undefined ->
             undefined
     end.
 
--spec unregister_name(Name :: term(), Pid :: pid()) -> Name :: term() | fail.
-unregister_name(Name, Pid) ->
-    case lasp_pg:leave(Name, Pid) of
-        {ok, _} ->
-            Name;
+-spec unregister_name(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> GrainRef :: erleans:grain_ref() | fail.
+unregister_name(GrainRef, Pid) ->
+    case plum_db_remove(GrainRef, Pid) of
+        ok ->
+            erleans_monitor:demonitor(GrainRef, Pid),
+            GrainRef;
         _ ->
             fail
     end.
 
--spec start_guard(Name :: term()) -> {ok, Guard :: pid()} | {error, any()}.
-start_guard(Name) ->
-    %% Set up a callback to be triggered on a single node (lasp handles this)
-    %% when the number of pids registered for this name goes above 1
-    EnforceFun =
-        case erlang:function_exported(twin_service_grain, is_location_right, 1) of
-            true ->
-                fun(AwSet) -> deactivate_dups_twin(Name, AwSet) end;
-            false ->
-                fun(AwSet) -> deactivate_dups(Name, AwSet) end
-        end,
-    lasp:enforce_once({term_to_binary(Name), ?SET}, {strict, {cardinality, 1}}, EnforceFun).
-
-deactivate_dups_twin(_Name, AwSet) ->
-    Set = state_awset:query(AwSet),
-    Size = sets:size(Set),
-    sets:fold(
-        fun(Pid, {true, N}) ->
-                terminate_grain(Pid),
-                {true, N+1};
-           (_Pid, {false, N}) when N =:= Size ->
-                {true, N+1};
-           (Pid, {false, N}) ->
+%% @private
+terminate_duplicates(GrainRef, Pids) ->
+    Fun = fun(Pid, {1, undefined}) ->
+                %% keep the last one as non of them replied true before
+                {0, Pid};
+             (Pid, {Rem, undefined}) ->
+                %% checks if grain activation is co-located with
+                %% the Kafka partition, won't cause a loop or an activation
+                %% because below call is not an erleans_grain:call/2,3
                 case twin_service_grain:is_location_right(Pid) of
                     true ->
-                        {true, N+1};
+                        %% this process will be selected
+                        {Rem - 1, Pid};
                     false ->
-                        terminate_grain(Pid),
-                        {false, N+1};
+                        %% terminate the grain as we still have at least
+                        %% one more in the list to check
+                        terminate_grain(GrainRef, Pid),
+                        {Rem - 1, undefined};
                     noproc ->
-                        {false, N+1}
-                end
-        end,
-        {false, 1}, Set).
+                        %% grain activation deactivated, or
+                        %% some other process terminated it
+                        plum_db_remove(GrainRef, Pid),
+                        {Rem - 1, undefined}
+                end;
+             (Pid, {Rem, Keep}) ->
+                %% we already have the one to keep, so we terminate the rest
+                terminate_grain(GrainRef, Pid),
+                {Rem - 1, Keep}
+          end,
+    {_, Pid} = lists:foldl(Fun, {length(Pids), undefined}, Pids),
+    Pid.
 
-%% deactivate all but a random activation.
-%% It is possible that this will be triggered multiple times and result in no
-%% remaining activations until the next request to a grain.
-deactivate_dups(Name, AwSet) ->
-    Set = state_awset:query(AwSet),
-    Size = sets:size(Set),
-    Keep = rand:uniform(Size),
-    ?LOG_INFO("at=deactivate_dups name=~p size=~p keep=~p", [Name, Size, Keep]),
-    sets:fold(fun(_, N) when N =:= Size ->
-                  N+1;
-                 (Pid, N) ->
-                  terminate_grain(Pid),
-                  N+1
-              end, 1, Set).
+%% @private
+terminate_grain(GrainRef, Pid) ->
+    %% spawn a terminator on the same node where the grain activation is
+    spawn(node(Pid), ?MODULE, terminator, [GrainRef, Pid]).
 
-terminate_grain(Pid) ->
-    supervisor:terminate_child({erleans_grain_sup, node(Pid)}, Pid).
+-spec terminator(GrainRef :: erleans:grain_ref(), Pid :: pid())
+        -> ok.
+terminator(GrainRef, Pid) ->
+    supervisor:terminate_child({erleans_grain_sup, node()}, Pid),
+    plum_db_remove(GrainRef, Pid).
 
--spec stop_guard(Guard :: pid() | undefined) -> ok | undefined | {error, any()}.
-stop_guard(Guard) when is_pid(Guard) ->
-    supervisor:terminate_child({lasp_process_sup, node(Guard)}, Guard);
-stop_guard(undefined) ->
-    undefined.
-
--spec whereis_name(GrainRef :: erleans:grain_ref()) -> pid() | undefined.
+-spec whereis_name(GrainRef :: erleans:grain_ref())
+        -> pid() | undefined.
 whereis_name(GrainRef=#{placement := stateless}) ->
     whereis_stateless(GrainRef);
 whereis_name(GrainRef=#{placement := {stateless, _}}) ->
     whereis_stateless(GrainRef);
 whereis_name(GrainRef) ->
-    case gproc:where(?stateful(GrainRef)) of
+    case gproc_lookup(GrainRef) of
         Pid when is_pid(Pid) ->
             Pid;
-        _ ->
-            case lasp_pg:members(GrainRef) of
-                {ok, Set} ->
-                    case sets:to_list(Set) of
-                        Pids when is_list(Pids) ->
-                            first_alive(Pids);
-                        _ ->
-                            undefined
-                    end;
-                _ ->
+        undefined ->
+            case plum_db_get(GrainRef) of
+                Pids when is_list(Pids) ->
+                    pick_first_alive(Pids);
+                undefined ->
                     undefined
             end
     end.
 
 %% @private
-first_alive([]) ->
+gproc_lookup(GrainRef) ->
+    case gproc:where(?stateful(GrainRef)) of
+        Pid when is_pid(Pid) ->
+            case erlang:is_process_alive(Pid) of
+                true ->
+                    Pid;
+                false ->
+                    undefined
+            end;
+        _ ->
+            undefined
+    end.
+
+%% @private
+pick_first_alive([]) ->
     undefined;
-first_alive([Pid | Pids]) ->
-    case rpc:call(node(Pid), erlang, is_process_alive, [Pid]) of
+pick_first_alive([Pid | Pids]) ->
+    case is_proc_alive(Pid) of
         true ->
             Pid;
-        _ ->
-            %%false or {badrpc, _}
-            first_alive(Pids)
+        false ->
+            pick_first_alive(Pids)
     end.
 
--spec send(Name :: term(), Message :: term()) -> pid().
-send(Name, Message) ->
-    case whereis_name(Name) of
-        Pid when is_pid(Pid) ->
-            Pid ! Message;
-        undefined ->
-            error({badarg, Name})
-    end.
-
+%% @private
 whereis_stateless(GrainRef) ->
     case gproc_pool:pick_worker(GrainRef) of
         false ->
@@ -172,3 +179,169 @@ whereis_stateless(GrainRef) ->
         Pid ->
             Pid
     end.
+
+
+
+
+-spec plum_db_add(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
+
+plum_db_add(GrainRef, Pid) ->
+    PKey = {?MODULE, grain_ref},
+    Opts = [
+        {resolver, fun resolver/2},
+        {allow_put, false} % We will manually put as we need to add Pid
+    ],
+
+    case plum_db:get(PKey, GrainRef, Opts) of
+        undefined ->
+            plum_db:put(PKey, GrainRef, [Pid]);
+        [] ->
+            plum_db:put(PKey, GrainRef, [Pid]);
+        Pids when is_list(Pids) ->
+            plum_db:put(PKey, GrainRef, lists:usort(Pids ++ [Pid]))
+    end.
+
+
+
+-spec plum_db_remove(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
+
+plum_db_remove(GrainRef, Pid) ->
+    PKey = {?MODULE, grain_ref},
+    Opts = [
+        {resolver, fun resolver/2},
+        {allow_put, false} % We will manually put as we need to remove Pid
+    ],
+    case plum_db:get(PKey, GrainRef, Opts) of
+        undefined ->
+            ok;
+        [] ->
+            ok;
+        Pids when is_list(Pids) ->
+            case Pids -- [Pid] of
+                [] ->
+                    plum_db:delete(PKey, GrainRef);
+                NewPids ->
+                    plum_db:put(PKey, GrainRef, lists:usort(NewPids))
+            end
+    end.
+
+
+-spec plum_db_get(GrainRef :: erleans:grain_ref()) -> list(pid()) | undefined.
+
+plum_db_get(GrainRef) ->
+    Opts = [
+        {resolver, fun resolver/2},
+        {allow_put, true} % This will make a put to store the resolved value
+    ],
+    plum_db:get({?MODULE, grain_ref}, GrainRef, Opts).
+
+
+
+%% @private
+resolver(?TOMBSTONE, ?TOMBSTONE) ->
+    ?TOMBSTONE;
+resolver(?TOMBSTONE, L) ->
+    maybe_tombstone(remove_dead(L));
+resolver(L, ?TOMBSTONE) ->
+    maybe_tombstone(remove_dead(L));
+resolver(L1, L2) when is_list(L1) andalso is_list(L2) ->
+    %% Lists are sorted already as we sort them every time we put
+    maybe_tombstone(
+        remove_dead(lists:umerge(L1, L2))
+    ).
+
+%% @private
+remove_dead(Pids) ->
+    lists:filter(
+        fun(Pid) -> is_proc_alive(Pid) end, Pids
+    ).
+
+is_proc_alive(Pid) ->
+    MyNode = node(),
+    case node(Pid) of
+        MyNode ->
+            is_process_alive(Pid);
+        Node ->
+            case rpc:call(Node, erlang, is_process_alive, [Pid], 5000) of
+                {badrpc, _Reason} ->
+                    %% Reason can be nodedown, timeout, etc.
+                    false;
+                Result ->
+                    Result
+            end
+    end.
+
+%% @private
+maybe_tombstone([]) ->
+    ?TOMBSTONE;
+maybe_tombstone(L) ->
+    L.
+
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, _Args = #{}, []).
+
+
+
+%% =============================================================================
+%% GEN_SERVER BEHAVIOR CALLBACKS
+%% =============================================================================
+
+-spec init(Args :: term()) ->
+    {ok, State :: term()}.
+
+init(#{} = _Args) ->
+    MS = [{
+        %% {{{_, _} = FullPrefix, Key}, NewObj, ExistingObj}
+        {{{erleans_pm, grain_ref}, '_'}, '_', '_'},
+        [],
+        [true]
+    }],
+    ok = plum_db_events:subscribe(object_update, MS),
+    {ok, _State = #{}}.
+
+-spec handle_call(Request :: term(), From :: {pid(),
+    Tag :: term()}, State :: term()) ->
+    {reply, Reply :: term(), NewState :: term()}.
+
+handle_call(_Request, _From, State) ->
+    {reply, ok, State}.
+
+-spec handle_cast(Request :: term(), State :: term()) ->
+    {noreply, NewState :: term()}.
+
+handle_cast(_Request, State) ->
+    {noreply, State}.
+
+-spec handle_info(Message :: term(), State :: term()) ->
+    {noreply, NewState :: term()}.
+
+handle_info(
+    {plum_db_event, object_update, {{{_, _}, GrainRef}, Obj, PrevObj}},
+    State) ->
+    logger:debug(#{
+        message => "plum_db_event object_update received",
+        object => Obj,
+        prev_obj => PrevObj
+    }),
+
+    case plum_db_object:value(plum_db_object:resolve(Obj, lww)) of
+        Pids when is_list(Pids), length(Pids) > 1 ->
+            %% we need to remove dead processes first to avoid the case when we
+            %% kill one that returns false in the belief that there's at least
+            %% one remaining but that could actually be dead already
+            PidsAlive = remove_dead(Pids),
+            _Pid = terminate_duplicates(GrainRef, PidsAlive);
+        _ ->
+            ok
+    end,
+    {noreply, State};
+
+handle_info(_, State) ->
+    {noreply, State}.
+
+-spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
+    State :: term()) ->
+    term().
+
+terminate(_Reason, _State) ->
+    ok.

@@ -230,17 +230,18 @@ init(Parent, GrainRef) ->
                     proc_lib:init_ack(Parent, {error, {already_started, Pid}});
                 {_, _Pid} ->
                     %%no error handling to keep original behavior
-                    case erleans_pm:register_name(GrainRef, Self) of
-                        yes ->
-                            case erleans_pm:start_guard(GrainRef) of
-                                {ok, Guard} ->
-                                    put(?GUARD, Guard);
-                                _Error ->
-                                    _Error
-                            end;
-                        _Error ->
-                            _Error
-                    end,
+%%                    case erleans_pm:register_name(GrainRef, Self) of
+%%                        yes ->
+%%                            case erleans_pm:start_guard(GrainRef) of
+%%                                {ok, Guard} ->
+%%                                    put(?GUARD, Guard);
+%%                                _Error ->
+%%                                    _Error
+%%                            end;
+%%                        _Error ->
+%%                            _Error
+%%                    end,
+                    erleans_pm:register_name(GrainRef, Self),
                     init_(Parent, GrainRef)
             end
     end.
@@ -276,8 +277,10 @@ init_(Parent, GrainRef=#{id := Id,
                     %% activate returning {error, notfound} is given special treatment and
                     %% results in an ignore from the statem and an `exit({noproc, notfound})`
                     %% from `erleans_grain`
+                    maybe_unregister(get(grain_ref)),
                     proc_lib:init_ack(Parent, ignore);
                 {error, Reason} ->
+                    maybe_unregister(get(grain_ref)),
                     proc_lib:init_ack(Parent, {error, Reason})
             end
     end.
@@ -315,10 +318,12 @@ active(enter, _OldState, Data=#data{deactivate_after=DeactivateAfter}) ->
 active({call, From}, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                            cb_state=CbData,
                                                            deactivate_after=DeactivateAfter}) ->
+    maybe_crash(CbData),
     handle_result(CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter));
 active({call, From}, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                          cb_state=CbData,
                                                          deactivate_after=DeactivateAfter}) ->
+    maybe_crash(CbData),
     otel:start_span(span_name(Msg), #{parent => SpanCtx}),
     otel:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
     try handle_result(CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter))
@@ -328,10 +333,12 @@ active({call, From}, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
 active(cast, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                    cb_state=CbData,
                                                    deactivate_after=DeactivateAfter}) ->
+    maybe_crash(CbData),
     handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter));
 active(cast, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                  cb_state=CbData,
                                                  deactivate_after=DeactivateAfter}) ->
+    maybe_crash(CbData),
     otel:start_span(span_name(Msg), #{parent => SpanCtx}),
     otel:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
     try handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter))
@@ -380,7 +387,9 @@ handle_event(_, Message, _, Data=#data{cb_module=CbModule,
 code_change(_OldVsn, State, Data, _Extra) ->
     {ok, State, Data}.
 
-terminate({shutdown, deactivated}, _State, #data{ref=GrainRef}) ->
+terminate({shutdown, Reason}, _State, #data{ref=GrainRef})
+        when Reason == deactivated;
+             Reason == committed_suicide ->
     maybe_remove_worker(GrainRef),
     ok;
 terminate(?NO_PROVIDER_ERROR, _State, #data{cb_module=CbModule,
@@ -417,7 +426,7 @@ maybe_unregister(#{placement := {stateless, _}}) ->
     ok;
 maybe_unregister(GrainRef) ->
     erleans_pm:unregister_name(GrainRef, self()),
-    erleans_pm:stop_guard(get(?GUARD)),
+%%    erleans_pm:stop_guard(get(?GUARD)),
     gproc:unreg(?stateful(GrainRef)).
 
 upd_timer(leave_timer, _) ->
@@ -467,7 +476,9 @@ handle_result({deactivate, NewCbData}, Data, _) ->
     {next_state, deactivating, Data#data{cb_state=NewCbData}, []};
 handle_result({deactivate, NewCbData, CbActions}, Data, _) ->
     {Actions1, Data1} = handle_actions(CbActions, [], NewCbData, Data),
-    {next_state, deactivating, Data1#data{cb_state=NewCbData}, Actions1}.
+    {next_state, deactivating, Data1#data{cb_state=NewCbData}, Actions1};
+handle_result({commit_suicide, Replies}, _Data, _Actions) ->
+    {stop_and_reply, {shutdown, committed_suicide}, Replies}.
 
 %% Drops unrecognized actions and converts cast actions to next_events that
 %% do not reset the activation timer
@@ -537,3 +548,9 @@ span_name(Msg) when is_tuple(Msg) ->
     element(1, Msg);
 span_name(Msg) ->
     Msg.
+
+%% if state is {error, _} we crash the grain
+maybe_crash({error, Reason}) ->
+    exit(Reason);
+maybe_crash(_) ->
+    ok.
