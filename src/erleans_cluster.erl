@@ -34,9 +34,11 @@ to_node(Name, Host, PartisanPort) ->
              {ok, IPAddress} ->
                  IPAddress
          end,
-    #{name => Name,
-      listen_addrs => [#{ip => IP, port => PartisanPort}],
-      parallelism => 1}.
+    #{
+        name => Name,
+        listen_addrs => [#{ip => IP, port => PartisanPort}],
+        channels => partisan_config:channels()
+    }.
 
 leave() ->
-    partisan_peer_service:leave([]).
+    partisan_peer_service:leave().

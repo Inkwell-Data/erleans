@@ -19,7 +19,9 @@
 %%% @end
 %%% ---------------------------------------------------------------------------
 -module(erleans_pm).
--behavior(gen_server).
+-behavior(partisan_gen_server).
+
+-include_lib("partisan/include/partisan.hrl").
 
 
 %% called by erleans
@@ -52,8 +54,10 @@
 
 -define(TOMBSTONE, '$deleted').
 
--spec register_name(GrainRef :: erleans:grain_ref(), Pid :: pid())
-        -> yes | no.
+
+
+-spec register_name(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> yes | no.
+
 register_name(GrainRef, Pid) when is_pid(Pid) ->
     case plum_db_add(GrainRef, Pid) of
         ok ->
@@ -93,7 +97,7 @@ terminate_duplicates(GrainRef, Pids) ->
                 %% checks if grain activation is co-located with
                 %% the Kafka partition, won't cause a loop or an activation
                 %% because below call is not an erleans_grain:call/2,3
-                case twin_service_grain:is_location_right(Pid) of
+                case erleans_grain:is_location_right(GrainRef, Pid) of
                     true ->
                         %% this process will be selected
                         {Rem - 1, Pid};
@@ -119,16 +123,16 @@ terminate_duplicates(GrainRef, Pids) ->
 %% @private
 terminate_grain(GrainRef, Pid) ->
     %% spawn a terminator on the same node where the grain activation is
-    spawn(node(Pid), ?MODULE, terminator, [GrainRef, Pid]).
+    spawn(partisan:node(Pid), ?MODULE, terminator, [GrainRef, Pid]).
 
 -spec terminator(GrainRef :: erleans:grain_ref(), Pid :: pid())
         -> ok.
 terminator(GrainRef, Pid) ->
-    supervisor:terminate_child({erleans_grain_sup, node()}, Pid),
+    supervisor:terminate_child({erleans_grain_sup, partisan:node()}, Pid),
     plum_db_remove(GrainRef, Pid).
 
--spec whereis_name(GrainRef :: erleans:grain_ref())
-        -> pid() | undefined.
+-spec whereis_name(GrainRef :: erleans:grain_ref()) -> binary() | undefined.
+
 whereis_name(GrainRef=#{placement := stateless}) ->
     whereis_stateless(GrainRef);
 whereis_name(GrainRef=#{placement := {stateless, _}}) ->
@@ -136,7 +140,9 @@ whereis_name(GrainRef=#{placement := {stateless, _}}) ->
 whereis_name(GrainRef) ->
     case gproc_lookup(GrainRef) of
         Pid when is_pid(Pid) ->
-            Pid;
+            %% We do this so that we have only encoded pids as return values
+            %% Since we are not using distributed GPROC, this Pid is local
+            partisan_remote_ref:from_term(Pid);
         undefined ->
             case plum_db_get(GrainRef) of
                 Pids when is_list(Pids) ->
@@ -186,6 +192,7 @@ whereis_stateless(GrainRef) ->
 -spec plum_db_add(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
 
 plum_db_add(GrainRef, Pid) ->
+    EncodedPid = partisan_remote_ref:from_term(Pid),
     PKey = {?MODULE, grain_ref},
     Opts = [
         {resolver, fun resolver/2},
@@ -194,11 +201,11 @@ plum_db_add(GrainRef, Pid) ->
 
     case plum_db:get(PKey, GrainRef, Opts) of
         undefined ->
-            plum_db:put(PKey, GrainRef, [Pid]);
+            plum_db:put(PKey, GrainRef, [EncodedPid]);
         [] ->
-            plum_db:put(PKey, GrainRef, [Pid]);
-        Pids when is_list(Pids) ->
-            plum_db:put(PKey, GrainRef, lists:usort(Pids ++ [Pid]))
+            plum_db:put(PKey, GrainRef, [EncodedPid]);
+        L when is_list(L) ->
+            plum_db:put(PKey, GrainRef, lists:usort(L ++ [EncodedPid]))
     end.
 
 
@@ -206,6 +213,7 @@ plum_db_add(GrainRef, Pid) ->
 -spec plum_db_remove(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
 
 plum_db_remove(GrainRef, Pid) ->
+    EncodedPid = partisan_remote_ref:from_term(Pid),
     PKey = {?MODULE, grain_ref},
     Opts = [
         {resolver, fun resolver/2},
@@ -216,17 +224,18 @@ plum_db_remove(GrainRef, Pid) ->
             ok;
         [] ->
             ok;
-        Pids when is_list(Pids) ->
-            case Pids -- [Pid] of
+        L0 when is_list(L0) ->
+            case L0 -- [EncodedPid] of
                 [] ->
                     plum_db:delete(PKey, GrainRef);
-                NewPids ->
-                    plum_db:put(PKey, GrainRef, lists:usort(NewPids))
+                L1 ->
+                    plum_db:put(PKey, GrainRef, lists:usort(L1))
             end
     end.
 
 
--spec plum_db_get(GrainRef :: erleans:grain_ref()) -> list(pid()) | undefined.
+-spec plum_db_get(GrainRef :: erleans:grain_ref()) ->
+    list(partisan_remote_ref:p()) | undefined.
 
 plum_db_get(GrainRef) ->
     Opts = [
@@ -256,13 +265,16 @@ remove_dead(Pids) ->
         fun(Pid) -> is_proc_alive(Pid) end, Pids
     ).
 
-is_proc_alive(Pid) ->
-    MyNode = node(),
-    case node(Pid) of
+is_proc_alive(EncodedPid) ->
+    MyNode = partisan:node(),
+    case partisan:node(EncodedPid) of
         MyNode ->
-            is_process_alive(Pid);
+            partisan:is_process_alive(EncodedPid);
         Node ->
-            case rpc:call(Node, erlang, is_process_alive, [Pid], 5000) of
+            Result = partisan_rpc:call(
+                Node, partisan, is_process_alive, [EncodedPid], 5000
+            ),
+            case Result of
                 {badrpc, _Reason} ->
                     %% Reason can be nodedown, timeout, etc.
                     false;
@@ -278,7 +290,7 @@ maybe_tombstone(L) ->
     L.
 
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, _Args = #{}, []).
+    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, _Args = #{}, []).
 
 
 
@@ -325,11 +337,11 @@ handle_info(
     }),
 
     case plum_db_object:value(plum_db_object:resolve(Obj, lww)) of
-        Pids when is_list(Pids), length(Pids) > 1 ->
+        EncodedPids when is_list(EncodedPids), length(EncodedPids) > 1 ->
             %% we need to remove dead processes first to avoid the case when we
             %% kill one that returns false in the belief that there's at least
             %% one remaining but that could actually be dead already
-            PidsAlive = remove_dead(Pids),
+            PidsAlive = remove_dead(EncodedPids),
             _Pid = terminate_duplicates(GrainRef, PidsAlive);
         _ ->
             ok
@@ -345,3 +357,4 @@ handle_info(_, State) ->
 
 terminate(_Reason, _State) ->
     ok.
+

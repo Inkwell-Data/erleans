@@ -11,8 +11,7 @@
     gproc,
     sbroker,
     erlware_commons,
-    opentelemetry_api,
-    plum_db
+    opentelemetry_api
    ]},
   {modules, []},
   {env, [{deactivate_after, 2700000}, %% 45 minutes

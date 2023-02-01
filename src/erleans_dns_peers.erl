@@ -27,7 +27,7 @@ discover(ClusterType, NodeName, Port) ->
 
 leave() ->
     ok.
-    %% partisan_peer_service:leave([]).
+    %% partisan_peer_service:leave().
 
 lookup(local, _NodeName, _Port) ->
     sets:new();

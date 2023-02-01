@@ -15,13 +15,13 @@
 -include("test_utils.hrl").
 
 all() ->
-    [{group, deactivate_after_1},
+    [{group, deactivate_after_2},
      {group, deactivate_after_30},
      {group, deactivate_after_60},
      {group, deactivate_after_50000}].
 
 groups() ->
-    [{deactivate_after_1, [], [manual_start_stop, ephemeral_state,
+    [{deactivate_after_2, [], [manual_start_stop, ephemeral_state,
                                no_provider_grain, exit_notfound]},
      {deactivate_after_60, [], [bad_etag_save]},
      {deactivate_after_30, [], [request_types]},
@@ -33,8 +33,8 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     ok.
 
-init_per_group(deactivate_after_1, Config) ->
-    init_per_group_(1, Config);
+init_per_group(deactivate_after_2, Config) ->
+    init_per_group_(2, Config);
 init_per_group(deactivate_after_30, Config) ->
     init_per_group_(30, Config);
 init_per_group(deactivate_after_60, Config) ->
@@ -43,14 +43,18 @@ init_per_group(deactivate_after_50000, Config) ->
     init_per_group_(50000, Config).
 
 init_per_group_(DeactivateAfter, Config) ->
+    application:load(plum_db), % will load partisan
     application:load(erleans),
     application:set_env(erleans, deactivate_after, DeactivateAfter),
+    {ok, _} = application:ensure_all_started(plum_db),
     {ok, _} = application:ensure_all_started(erleans),
     Config.
 
 end_per_group(_, _Config) ->
     application:stop(erleans),
+    application:stop(plum_db),
     application:unload(erleans),
+    application:unload(plum_db),
     ok.
 
 init_per_testcase(_, Config) ->
@@ -66,7 +70,10 @@ manual_start_stop(_Config) ->
     ?assertEqual({ok, 1}, test_grain:activated_counter(Grain1)),
     ?assertEqual({ok, 1}, test_grain:activated_counter(Grain2)),
 
-    %% with a leasetime of 1 second it should be gone now
+
+    %% with a leasetime of 2 seconds it should be gone now, but we sleep
+    %% just in case
+    timer:sleep(2000),
     ?UNTIL(erleans_pm:whereis_name(Grain1) =:= undefined),
     ?UNTIL(erleans_pm:whereis_name(Grain2) =:= undefined),
 
@@ -142,9 +149,14 @@ request_types(_Config) ->
                     Loop(N) ->
                         case erleans_pm:whereis_name(Grain) of
                             Pid when is_pid(Pid) -> Pid;
-                            _ ->
-                                timer:sleep(1),
-                                Loop(N - 1)
+                            Term ->
+                                case partisan_remote_ref:is_pid(Term) of
+                                    true ->
+                                        Term;
+                                    false ->
+                                        timer:sleep(1),
+                                        Loop(N - 1)
+                                end
                         end
                 end)(200),
 
@@ -163,14 +175,19 @@ request_types(_Config) ->
                     Loop(N) ->
                         case erleans_pm:whereis_name(Grain) of
                             Pid when is_pid(Pid) -> Pid;
-                            _ ->
-                                timer:sleep(1),
-                                Loop(N - 1)
+                            Term ->
+                                case partisan_remote_ref:is_pid(Term) of
+                                    true ->
+                                        Term;
+                                    false ->
+                                        timer:sleep(1),
+                                        Loop(N - 1)
+                                end
                         end
                 end)(50),
 
     ?assertEqual(GrainPid, GrainPid2),
-    ?assert(is_process_alive(GrainPid)),
+    ?assert(partisan:is_process_alive(GrainPid)),
 
     ?assertEqual({ok, node()}, test_grain:node(Grain)),
     timer:sleep(20),

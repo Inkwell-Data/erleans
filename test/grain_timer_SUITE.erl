@@ -31,7 +31,9 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(defaults, Config) ->
+    application:load(plum_db), % will load partisan
     application:load(erleans),
+    {ok, _} = application:ensure_all_started(plum_db), % will start partisan
     {ok, _} = application:ensure_all_started(erleans),
     Config;
 init_per_group(deactivate_after_30, Config) ->
@@ -42,7 +44,9 @@ init_per_group(deactivate_after_30, Config) ->
 
 end_per_group(_, _Config) ->
     application:stop(erleans),
+    application:stop(plum_db), % will stop partisan
     application:unload(erleans),
+    application:unload(plum_db),
     ok.
 
 single_timer(_Config) ->
@@ -61,7 +65,7 @@ single_timer(_Config) ->
     Pid = erleans_pm:whereis_name(Grain),
     ok = ?g:stop(Grain), % but should clear when it stops
     (fun Loop() ->
-             case is_process_alive(Pid) of
+             case partisan:is_process_alive(Pid) of
                  false -> ok;
                  _ -> timer:sleep(20), Loop()
              end

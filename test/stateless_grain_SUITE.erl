@@ -19,12 +19,17 @@ all() ->
     [single_activation, crash_worker, timeout_no_workers].
 
 init_per_suite(Config) ->
+    application:load(plum_db), % will load partisan
     application:load(erleans),
+    {ok, _} = application:ensure_all_started(plum_db),
     {ok, _} = application:ensure_all_started(erleans),
     Config.
 
 end_per_suite(_Config) ->
     application:stop(erleans),
+    application:stop(plum_db),
+    application:unload(erleans),
+    application:unload(plum_db),
     ok.
 
 single_activation(_Config) ->

@@ -21,64 +21,77 @@ all() ->
     [manual_start_stop].
 
 init_per_suite(Config) ->
-    application:load(partisan),
+    application:load(plum_db), % will load partisan
     application:load(erleans),
     application:set_env(partisan, peer_port, 10200),
     application:set_env(partisan, pid_encoding, false),
-    %% lower gossip interval of partisan membership so it triggers more often in tests
+    %% lower gossip interval of partisan membership so it triggers more often
+    %% in tests
     application:set_env(partisan, periodic_enabled, true),
     application:set_env(partisan, periodic_interval, 100),
-    application:load(lasp),
+    logger:set_application_level(partisan, error),
+    {ok, _} = application:ensure_all_started(plum_db), % will start partisan
     {ok, _} = application:ensure_all_started(erleans),
     start_nodes(),
     Config.
 
 end_per_suite(_Config) ->
     application:stop(erleans),
-    application:stop(plumtree),
-    application:stop(partisan),
-    application:stop(lasp_pg),
-    application:stop(lasp),
+    application:stop(plum_db), % will stop partisan
+    application:unload(erleans),
+    application:unload(plum_db),
+
     {ok, _} = ct_slave:stop(?NODE_A),
     ok.
 
 start_nodes() ->
     Nodes = [{?NODE_A, 10201}], %, b, c, d],
+    ct:pal("\e[32m Starting nodes ~p \e[0m", [Nodes]),
     start_nodes(Nodes, []).
 
 start_nodes([], Acc) ->
     Acc;
 start_nodes([{Node, PeerPort} | T], Acc) ->
+    ct:pal("\e[32m Starting node ~p \e[0m", [Node]),
     CodePath = code:get_path(),
     Paths = lists:flatten([["-pa ", Path, " "] || Path <- CodePath]),
     ErlFlags = "-config ../../../../test/sys.config " ++ Paths,
-    {ok, HostNode} = ct_slave:start(Node,
-                                    [{kill_if_fail, true},
-                                     {monitor_master, true},
-                                     {init_timeout, 3000},
-                                     {startup_timeout, 3000},
-                                     {startup_functions,
-                                      [{logger, set_handler_config, [default, config,
-                                                                     #{file => "log/ct_console.log"}]},
-                                       {logger, set_handler_config, [default, formatter,
-                                                                     {logger_formatter, #{}}]},
-                                       {application, load, [partisan]},
-                                       {application, load, [erleans]},
-                                       {application, set_env, [partisan, pid_encoding, false]},
-                                       {application, set_env, [partisan, periodic_enabled, true]},
-                                       {application, set_env, [partisan, periodic_interval, 100]},
-                                       {application, set_env, [partisan, peer_port, PeerPort]},
-                                       {application, ensure_all_started, [partisan]},
-                                       {application, ensure_all_started, [erleans]}]},
-                                     {erl_flags, ErlFlags}]),
+    PDBPrefixes = [{erleans_pm, #{shard_by => prefix, type => ram}}],
+    DataDir = atom_to_list(Node) ++ "_data",
+
+    {ok, HostNode} = ct_slave:start(Node,[
+        {kill_if_fail, true},
+        {monitor_master, true},
+        {init_timeout, 3000},
+        {startup_timeout, 3000},
+        {startup_functions, [
+            {logger, set_handler_config, [default, config,
+                #{file => "log/ct_console.log"}
+            ]},
+            {logger, set_handler_config, [default, formatter,
+             {logger_formatter, #{}}]},
+            {application, load, [plum_db]},
+            {application, load, [erleans]},
+            {application, set_env, [partisan, pid_encoding, false]},
+            {application, set_env, [partisan, remote_ref_as_uri, true]},
+            {application, set_env, [partisan, periodic_enabled, true]},
+            {application, set_env, [partisan, periodic_interval, 100]},
+            {application, set_env, [partisan, peer_port, PeerPort]},
+            {application, set_env, [plum_db, data_dir, DataDir]},
+            {application, set_env, [plum_db, prefixes, PDBPrefixes]},
+            {application, ensure_all_started, [plum_db]},
+            {application, ensure_all_started, [erleans]}
+        ]},
+        {erl_flags, ErlFlags}
+    ]),
     timer:sleep(1000),
 
-    ct:print("\e[32m Node ~p [OK] \e[0m", [HostNode]),
+    ct:pal("\e[32m Node ~p [OK] \e[0m", [HostNode]),
     true = net_kernel:connect_node(?NODE_A),
     rpc:call(?NODE_A, partisan_peer_service, join, [#{name => ?NODE_CT,
                                                       listen_addrs => [#{ip => {127,0,0,1}, port => 10200}],
                                                       parallelism => 1}]),
-    ok = lasp_peer_service:join(#{name => ?NODE_A,
+    ok = partisan_peer_service:join(#{name => ?NODE_A,
                                   listen_addrs => [#{ip => {127,0,0,1}, port => PeerPort}],
                                   parallelism => 1}),
     start_nodes(T, [HostNode | Acc]).

@@ -28,6 +28,8 @@
 
 start(_StartType, _StartArgs) ->
     Config = application:get_all_env(erleans),
+    %% plum_db will start partisan
+    _ = application:ensure_all_started(plum_db, permanent),
     erleans_sup:start_link(Config).
 
 stop(_State) ->

@@ -17,3 +17,4 @@ _build
 .idea
 rebar3.crashdump
 doc
+/data

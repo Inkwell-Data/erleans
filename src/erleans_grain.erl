@@ -29,7 +29,8 @@
 %%% ---------------------------------------------------------------------------
 -module(erleans_grain).
 
--behaviour(gen_statem).
+-behaviour(partisan_gen_statem).
+
 
 -export([start_link/1,
          call/2,
@@ -42,10 +43,12 @@
          active/3,
          deactivating/3,
          terminate/3,
+         is_location_right/2,
          code_change/4]).
 
 -include("erleans.hrl").
 -include_lib("kernel/include/logger.hrl").
+-include_lib("opentelemetry_api/include/tracer.hrl").
 
 -define(DEFAULT_TIMEOUT, 5000).
 -define(NO_PROVIDER_ERROR, no_provider_configured).
@@ -80,6 +83,9 @@
 
 -callback handle_info(Msg :: term(), CbData :: cb_state()) -> callback_result().
 
+
+-callback is_location_right(Pid :: pid()) -> boolean().
+
 -callback deactivate(CbData :: cb_state()) -> {ok, CbData :: cb_state()} |
                                               {save_state, CbData :: cb_state()}.
 
@@ -88,6 +94,7 @@
                      placement/0,
                      state/1,
                      handle_info/2,
+                     is_location_right/1,
                      deactivate/1]).
 
 -record(data,
@@ -123,7 +130,7 @@ call(GrainRef, Request, Timeout) ->
     ReqType = req_type(),
     do_for_ref(GrainRef, fun(_, Pid) ->
                                  try
-                                     gen_statem:call(Pid, {otel:current_span_ctx(), ReqType, Request}, Timeout)
+                                     partisan_gen_statem:call(Pid, {?current_span_ctx, ReqType, Request}, Timeout)
                                  catch
                                      exit:{bad_etag, _} ->
                                          ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
@@ -134,7 +141,7 @@ call(GrainRef, Request, Timeout) ->
 -spec cast(GrainRef :: erleans:grain_ref(), Request :: term()) -> Reply :: term().
 cast(GrainRef, Request) ->
     ReqType = req_type(),
-    do_for_ref(GrainRef, fun(_, Pid) -> gen_statem:cast(Pid, {otel:current_span_ctx(), ReqType, Request}) end).
+    do_for_ref(GrainRef, fun(_, Pid) -> partisan_gen_statem:cast(Pid, {?current_span_ctx, ReqType, Request}) end).
 
 req_type() ->
     case get(req_type) of
@@ -156,7 +163,7 @@ do_for_ref(GrainRef=#{placement := {stateless, _N}}, Fun) ->
 do_for_ref(GrainRef, Fun) ->
     try
         case erleans_pm:whereis_name(GrainRef) of
-            Pid when is_pid(Pid) ->
+            Pid when is_binary(Pid) ->
                 Fun(noname, Pid);
             undefined ->
                 ?LOG_INFO("start=~p", [GrainRef]),
@@ -195,6 +202,14 @@ activate_grain(GrainRef=#{placement := Placement}) ->
         %%  load placement
     end.
 
+
+-spec is_location_right(erlans:grain_ref(), EncodedPid :: binary()) ->
+    boolean().
+
+is_location_right(#{implementing_module := Mod}, EncodedPid) ->
+    erleans_utils:fun_or_default(Mod, is_location_right, 1, [EncodedPid], true).
+
+
 %% Stateless are always activated on the local node if <N exist already on the node
 activate_stateless(GrainRef, _N) ->
     erleans_grain_sup:start_child(GrainRef).
@@ -212,7 +227,8 @@ activate_random(GrainRef) ->
     erleans_grain_sup:start_child(Node, GrainRef).
 
 %% not used but required by the behaviour definition
-init(Args) -> erlang:error(not_implemented, [Args]).
+init(Args) ->
+    erlang:error(not_implemented, [Args]).
 
 init(Parent, GrainRef) ->
     put(grain_ref, GrainRef),
@@ -299,7 +315,6 @@ verify_and_enter_loop(Parent, GrainRef, CbModule, Id, Provider, ETag, GrainOpts,
     DeactivateAfter = maps:get(deactivate_after, GrainOpts, erleans_config:get(deactivate_after)),
     Data = #data{cb_module        = CbModule,
                  cb_state         = CbData2,
-
                  id               = Id,
                  etag             = ETag1,
                  provider         = Provider,
@@ -308,7 +323,7 @@ verify_and_enter_loop(Parent, GrainRef, CbModule, Id, Provider, ETag, GrainOpts,
                  deactivate_after = case DeactivateAfter of 0 -> infinity; _ -> DeactivateAfter end
                 },
     proc_lib:init_ack(Parent, {ok, self()}),
-    gen_statem:enter_loop(?MODULE, [], active, Data).
+    partisan_gen_statem:enter_loop(?MODULE, [], active, Data).
 
 callback_mode() ->
     [state_functions, state_enter].
@@ -324,11 +339,11 @@ active({call, From}, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                          cb_state=CbData,
                                                          deactivate_after=DeactivateAfter}) ->
     maybe_crash(CbData),
-    otel:start_span(span_name(Msg), #{parent => SpanCtx}),
-    otel:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
+    ?start_span(span_name(Msg), #{parent => SpanCtx}),
+    ?set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
     try handle_result(CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter))
     after
-        otel:end_span()
+        ?end_span()
     end;
 active(cast, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                    cb_state=CbData,
@@ -339,11 +354,11 @@ active(cast, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                  cb_state=CbData,
                                                  deactivate_after=DeactivateAfter}) ->
     maybe_crash(CbData),
-    otel:start_span(span_name(Msg), #{parent => SpanCtx}),
-    otel:set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
+    ?start_span(span_name(Msg), #{parent => SpanCtx}),
+    ?set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
     try handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter))
     after
-        otel:end_span()
+        ?end_span()
     end;
 active(state_timeout, activation_expiry, Data) ->
     {next_state, deactivating, Data};
