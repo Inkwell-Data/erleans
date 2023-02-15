@@ -163,8 +163,6 @@ do_for_ref(GrainRef=#{placement := {stateless, _N}}, Fun) ->
 do_for_ref(GrainRef, Fun) ->
     try
         case erleans_pm:whereis_name(GrainRef) of
-            Pid when is_binary(Pid) ->
-                Fun(noname, Pid);
             undefined ->
                 ?LOG_INFO("start=~p", [GrainRef]),
                 case activate_grain(GrainRef) of
@@ -179,7 +177,9 @@ do_for_ref(GrainRef, Fun) ->
                         Fun(noname, Pid);
                     {error, Error} ->
                         exit({noproc, Error})
-                end
+                end;
+            Pid ->
+                Fun(noname, Pid)
         end
     catch
         %% Retry only if the process deactivated
