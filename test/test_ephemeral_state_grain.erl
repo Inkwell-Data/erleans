@@ -59,7 +59,7 @@ activate(_, PState=#{activated_counter := Counter}) ->
     {ok, {#{counter => 0}, PState#{activated_counter => Counter+1}}, #{}}.
 
 handle_call(node, From, State) ->
-    {ok, State, [{reply, From, {ok, node()}}]};
+    {ok, State, [{reply, From, {ok, partisan:node()}}]};
 handle_call(increment_ephemeral_counter, From, {EState=#{counter := Counter}, PState}) ->
     {ok, {EState#{counter => Counter+1}, PState}, [{reply, From, ok}, save_state]};
 handle_call(ephemeral_counter, From, State={#{counter := Counter}, _}) ->

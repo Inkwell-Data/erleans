@@ -266,11 +266,11 @@ remove_dead(Pids) ->
     ).
 
 is_proc_alive(EncodedPid) ->
-    MyNode = partisan:node(),
-    case partisan:node(EncodedPid) of
-        MyNode ->
+    case partisan:is_local_pid(EncodedPid) of
+        true ->
             partisan:is_process_alive(EncodedPid);
-        Node ->
+        false ->
+            Node = partisan:node(EncodedPid),
             Result = partisan_rpc:call(
                 Node, partisan, is_process_alive, [EncodedPid], 5000
             ),
@@ -283,9 +283,11 @@ is_proc_alive(EncodedPid) ->
             end
     end.
 
+
 %% @private
 maybe_tombstone([]) ->
     ?TOMBSTONE;
+
 maybe_tombstone(L) ->
     L.
 

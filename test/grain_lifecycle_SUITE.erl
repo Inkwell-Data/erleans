@@ -142,7 +142,7 @@ request_types(_Config) ->
     application:set_env(erleans, deactivate_after, 30),
     Grain = erleans:get_grain(test_grain, <<"request-types-grain">>),
 
-    ?assertEqual({ok, node()}, test_grain:node(Grain)),
+    ?assertEqual({ok, partisan:node()}, test_grain:node(Grain)),
 
     GrainPid = (fun Loop(0) ->
                         error(waaah);
@@ -189,7 +189,7 @@ request_types(_Config) ->
     ?assertEqual(GrainPid, GrainPid2),
     ?assert(partisan:is_process_alive(GrainPid)),
 
-    ?assertEqual({ok, node()}, test_grain:node(Grain)),
+    ?assertEqual({ok, partisan:node()}, test_grain:node(Grain)),
     timer:sleep(20),
 
     _Pinger =

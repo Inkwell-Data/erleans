@@ -62,7 +62,7 @@ handle_call(Msg, From, State=#{call_counter := CallCounter}) ->
     handle_call_(Msg, From, State#{call_counter => CallCounter+1}).
 
 handle_call_(node, From, State) ->
-    {ok, State, [{reply, From, {ok, node()}}]};
+    {ok, State, [{reply, From, {ok, partisan:node()}}]};
 handle_call_(pid, From, State) ->
     {ok, State, [{reply, From, {ok, self()}}]};
 handle_call_(call_counter, From, State=#{call_counter := CallCounter}) ->

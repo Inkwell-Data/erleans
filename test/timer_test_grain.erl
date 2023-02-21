@@ -74,7 +74,7 @@ activate(_, State=#{}) ->
     {ok, State#{acc => []}, #{}}.
 
 handle_call(node, From, State) ->
-    {ok, State, [{reply, From, {ok, node()}}]};
+    {ok, State, [{reply, From, {ok, partisan:node()}}]};
 
 handle_call(clear, From, State = #{acc := Acc}) ->
     {ok, State#{acc => []}, [{reply, From, {ok, Acc}}]};

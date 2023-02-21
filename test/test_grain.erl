@@ -57,7 +57,7 @@ activate(_, State=#{activated_counter := Counter}) ->
 handle_call(call_counter, From, State=#{call_counter := CallCounter}) ->
     {ok, State#{call_counter => CallCounter+1}, [{reply, From, {ok, CallCounter}}]};
 handle_call(node, From, State=#{call_counter := CallCounter}) ->
-    {ok, State#{call_counter => CallCounter+1}, [{reply, From, {ok, node()}}]};
+    {ok, State#{call_counter => CallCounter+1}, [{reply, From, {ok, partisan:node()}}]};
 handle_call(deactivated_counter, From, State=#{deactivated_counter := Counter,
                                                call_counter := CallCounter}) ->
     {ok, State#{call_counter => CallCounter+1}, [{reply, From, {ok, Counter}}]};

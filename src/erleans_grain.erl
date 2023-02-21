@@ -179,6 +179,7 @@ do_for_ref(GrainRef, Fun) ->
                         exit({noproc, Error})
                 end;
             Pid ->
+                %% Partisan pid ()
                 Fun(noname, Pid)
         end
     catch
