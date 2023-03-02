@@ -11,7 +11,7 @@
  ]},
 
  {partisan, [
-   {peer_port, 10000},
+   {peer_port, ${PARTISAN_PEER_PORT}},
    {pid_encoding, false},
    {remote_ref_as_uri, true},
    {peer_service_manager,
