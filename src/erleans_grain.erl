@@ -204,7 +204,7 @@ activate_grain(GrainRef=#{placement := Placement}) ->
     end.
 
 
--spec is_location_right(erlans:grain_ref(), EncodedPid :: binary()) ->
+-spec is_location_right(erlans:grain_ref(), EncodedPid :: partisan_remote_ref:p()) ->
     boolean().
 
 is_location_right(#{implementing_module := Mod}, EncodedPid) ->
