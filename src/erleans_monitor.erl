@@ -1,6 +1,6 @@
 -module(erleans_monitor).
 
--behavior(partisan_gen_server).
+-behavior(gen_server).
 
 -export([start_link/0,
          monitor/2,
@@ -26,13 +26,13 @@ start_link() ->
         _ ->
             ok
     end,
-    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 -spec monitor(GrainRef :: erleans:grain_ref(), Pid :: pid())
         -> ok.
 monitor(GrainRef, Pid) ->
     _ = ets:insert(?TAB, {Pid, GrainRef}),
-    partisan_gen_server:cast(?MODULE, {monitor_me, Pid}).
+    gen_server:cast(?MODULE, {monitor_me, Pid}).
 
 -spec demonitor(GrainRef :: erleans:grain_ref(), Pid :: pid())
         -> true.
