@@ -131,7 +131,8 @@ terminator(GrainRef, Pid) ->
     supervisor:terminate_child({erleans_grain_sup, partisan:node()}, Pid),
     plum_db_remove(GrainRef, Pid).
 
--spec whereis_name(GrainRef :: erleans:grain_ref()) -> binary() | undefined.
+-spec whereis_name(GrainRef :: erleans:grain_ref()) ->
+    partisan_remote_ref:p() | undefined.
 
 whereis_name(GrainRef=#{placement := stateless}) ->
     whereis_stateless(GrainRef);
