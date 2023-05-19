@@ -30,7 +30,7 @@
   0},
  {<<"partisan">>,
   {git,"http://github.com/lasp-lang/partisan.git",
-       {ref,"309e02545b646e66be46f686d292672bee05e2a6"}},
+       {ref,"269400065baabc7b1fc654a159ef8b31d2c9af78"}},
   0},
  {<<"plum_db">>,
   {git,"https://github.com/leapsight/plum_db.git",
