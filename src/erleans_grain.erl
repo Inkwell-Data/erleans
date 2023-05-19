@@ -129,14 +129,16 @@ call(GrainRef, Request) ->
 call(GrainRef, Request, Timeout) ->
     ReqType = req_type(),
     do_for_ref(GrainRef, fun(_, Pid) ->
-                                 try
-                                     partisan_gen_statem:call(Pid, {?current_span_ctx, ReqType, Request}, Timeout)
-                                 catch
-                                     exit:{bad_etag, _} ->
-                                         ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
-                                         {exit, saved_etag_changed}
-                                 end
-                         end).
+         try
+             partisan_gen_statem:call(
+                Pid, {?current_span_ctx, ReqType, Request}, Timeout
+            )
+         catch
+             exit:{bad_etag, _} ->
+                 ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
+                 {exit, saved_etag_changed}
+         end
+ end).
 
 -spec cast(GrainRef :: erleans:grain_ref(), Request :: term()) -> Reply :: term().
 cast(GrainRef, Request) ->
@@ -153,6 +155,7 @@ req_type() ->
 
 do_for_ref(GrainPid, Fun) when is_pid(GrainPid) ->
     Fun(noname, GrainPid);
+
 do_for_ref(GrainRef=#{placement := {stateless, _N}}, Fun) ->
     case erleans_stateless:pick_grain(GrainRef, Fun) of
         {ok, Res} ->
@@ -171,10 +174,10 @@ do_for_ref(GrainRef, Fun) ->
                         %% is an ignore from the statem, which can
                         %% only happen for `{error, notfound}`
                         exit({noproc, notfound});
-                    {ok, Pid} ->
-                        Fun(noname, Pid);
-                    {error, {already_started, Pid}} ->
-                        Fun(noname, Pid);
+                    {ok, ProcessRef} ->
+                        Fun(noname, ProcessRef);
+                    {error, {already_started, ProcessRef}} ->
+                        Fun(noname, ProcessRef);
                     {error, Error} ->
                         exit({noproc, Error})
                 end;
@@ -204,11 +207,12 @@ activate_grain(GrainRef=#{placement := Placement}) ->
     end.
 
 
--spec is_location_right(erlans:grain_ref(), EncodedPid :: partisan_remote_ref:p()) ->
+-spec is_location_right(
+    erlans:grain_ref(), ProcessRef :: partisan_remote_ref:p()) ->
     boolean().
 
-is_location_right(#{implementing_module := Mod}, EncodedPid) ->
-    erleans_utils:fun_or_default(Mod, is_location_right, 1, [EncodedPid], true).
+is_location_right(#{implementing_module := Mod}, ProcessRef) ->
+    erleans_utils:fun_or_default(Mod, is_location_right, 1, [ProcessRef], true).
 
 
 %% Stateless are always activated on the local node if <N exist already on the node
@@ -231,6 +235,7 @@ activate_random(GrainRef) ->
 init(Args) ->
     erlang:error(not_implemented, [Args]).
 
+
 init(Parent, GrainRef) ->
     put(grain_ref, GrainRef),
     process_flag(trap_exit, true),
@@ -238,48 +243,39 @@ init(Parent, GrainRef) ->
     case GrainRef of
         #{placement := {stateless, _N}} ->
             init_(Parent, GrainRef);
-        _->
+        _ ->
             Self = self(),
-            %% use a node local gproc registration to ensure no duplicates can
-            %% be made on a single node.
-            case gproc:reg_or_locate(?stateful(GrainRef), Self) of
-                {_, Pid} when Pid =/= Self ->
-                    proc_lib:init_ack(Parent, {error, {already_started, Pid}});
-                {_, _Pid} ->
-                    %%no error handling to keep original behavior
-%%                    case erleans_pm:register_name(GrainRef, Self) of
-%%                        yes ->
-%%                            case erleans_pm:start_guard(GrainRef) of
-%%                                {ok, Guard} ->
-%%                                    put(?GUARD, Guard);
-%%                                _Error ->
-%%                                    _Error
-%%                            end;
-%%                        _Error ->
-%%                            _Error
-%%                    end,
-                    erleans_pm:register_name(GrainRef, Self),
-                    init_(Parent, GrainRef)
+            case erleans_pm:register_name(GrainRef) of
+                ok ->
+                    init_(Parent, GrainRef);
+                {error, {already_in_use, ProcessRef}} ->
+                    proc_lib:init_ack(
+                        Parent, {error, {already_started, ProcessRef}}
+                    );
+                {error, Reason} ->
+                    proc_lib:init_ack(Parent, {error, Reason})
             end
     end.
 
-init_(Parent, GrainRef=#{id := Id,
-                         implementing_module := CbModule}) ->
-    {CbData, ETag} = case maps:find(provider, GrainRef) of
-                          {ok, Provider={ProviderModule, ProviderName}} ->
-                              case ProviderModule:read(CbModule, ProviderName, Id) of
-                                  {ok, SavedData, E} ->
-                                      {SavedData, E};
-                                  _ ->
-                                      new_state(CbModule, Id)
-                              end;
-                         {ok, undefined} ->
-                             Provider = undefined,
-                             new_state(CbModule, Id);
-                         error ->
-                             Provider = undefined,
-                             new_state(CbModule, Id)
-                      end,
+init_(Parent, GrainRef) ->
+    #{id := Id, implementing_module := CbModule} = GrainRef,
+
+    {CbData, ETag} =
+        case maps:find(provider, GrainRef) of
+            {ok, Provider={ProviderModule, ProviderName}} ->
+                case ProviderModule:read(CbModule, ProviderName, Id) of
+                    {ok, SavedData, E} ->
+                        {SavedData, E};
+                _ ->
+                    new_state(CbModule, Id)
+            end;
+            {ok, undefined} ->
+                Provider = undefined,
+                new_state(CbModule, Id);
+            error ->
+                Provider = undefined,
+                new_state(CbModule, Id)
+        end,
 
     maybe_add_worker(GrainRef),
 
@@ -287,20 +283,30 @@ init_(Parent, GrainRef=#{id := Id,
         notfound ->
             proc_lib:init_ack(Parent, ignore);
         _ ->
-            case erleans_utils:fun_or_default(CbModule, activate, 2, [GrainRef, CbData], {ok, CbData, #{}}) of
+            Value = erleans_utils:fun_or_default(
+                CbModule, activate, 2, [GrainRef, CbData], {ok, CbData, #{}}
+            ),
+            case Value of
                 {ok, CbData1, GrainOpts} ->
-                    verify_and_enter_loop(Parent, GrainRef, CbModule, Id, Provider, ETag, GrainOpts, CbData1);
+                    verify_and_enter_loop(
+                        Parent, GrainRef, CbModule, Id, Provider, ETag,
+                        GrainOpts, CbData1
+                    );
                 {error, notfound} ->
-                    %% activate returning {error, notfound} is given special treatment and
-                    %% results in an ignore from the statem and an `exit({noproc, notfound})`
+                    %% activate returning {error, notfound} is given special
+                    %% treatment and
+                    %% results in an ignore from the statem and an
+                    %% `exit({noproc, notfound})`
                     %% from `erleans_grain`
                     maybe_unregister(get(grain_ref)),
                     proc_lib:init_ack(Parent, ignore);
+
                 {error, Reason} ->
                     maybe_unregister(get(grain_ref)),
                     proc_lib:init_ack(Parent, {error, Reason})
             end
     end.
+
 
 new_state(CbModule, Id) ->
     case erlang:function_exported(CbModule, state, 1) of
@@ -412,7 +418,11 @@ terminate(?NO_PROVIDER_ERROR, _State, #data{cb_module=CbModule,
                                             id=Id,
                                             ref=GrainRef}) ->
     maybe_remove_worker(GrainRef),
-    ?LOG_ERROR("attempted to save without storage provider configured: id=~p cb_module=~p", [Id, CbModule]),
+    ?LOG_ERROR(
+        "attempted to save without storage provider configured: "
+        "id=~p cb_module=~p",
+        [Id, CbModule]
+    ),
     %% We do not want to call the deactivate callback here because this
     %% is not a deactivation, it is a hard crash.
     ok;
@@ -441,9 +451,8 @@ maybe_remove_worker(_) ->
 maybe_unregister(#{placement := {stateless, _}}) ->
     ok;
 maybe_unregister(GrainRef) ->
-    erleans_pm:unregister_name(GrainRef, self()),
-%%    erleans_pm:stop_guard(get(?GUARD)),
-    gproc:unreg(?stateful(GrainRef)).
+    _ = erleans_pm:unregister_name(GrainRef),
+    ok.
 
 upd_timer(leave_timer, _) ->
     [];
@@ -459,24 +468,36 @@ upd_timer(cancel_timer, _) ->
 %% automatically started when referenced stopping doesn't make much sense in the
 %% traditional sense. Maybe it should be removed or at least renamed and maybe act as
 %% recoverable?
-finalize_and_stop(Data=#data{cb_module=CbModule,
-                             id=Id,
-                             ref=Ref,
-                             provider=Provider,
-                             cb_state=CbData,
-                             etag=ETag}) ->
+finalize_and_stop(#data{} = Data) ->
+    #data{
+        cb_module=CbModule,
+        id=Id,
+        ref=Ref,
+        provider=Provider,
+        cb_state=CbData,
+        etag=ETag
+    } = Data,
+
     %% Save to or delete from backing storage.
     maybe_unregister(Ref),
 
-    case erleans_utils:fun_or_default(CbModule, deactivate, 1, [CbData], {ok, CbData}) of
+    Value = erleans_utils:fun_or_default(
+        CbModule, deactivate, 1, [CbData], {ok, CbData}
+    ),
+
+    case Value of
         {save_state, NewCbData={_, PersistentState}} ->
             %% We ignore the returned NewPersistentState
-            {NewETag, _} = update_state(CbModule, Provider, Id, PersistentState, ETag),
+            {NewETag, _} = update_state(
+                CbModule, Provider, Id, PersistentState, ETag
+            ),
             {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData,
                                                       etag=NewETag}};
         {save_state, NewCbData} ->
             %% We ignore the returned NewPersistentState
-            {NewETag, _} = update_state(CbModule, Provider, Id, NewCbData, ETag),
+            {NewETag, _} = update_state(
+                CbModule, Provider, Id, NewCbData, ETag
+            ),
             {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData,
                                                       etag=NewETag}};
         {ok, NewCbData} ->

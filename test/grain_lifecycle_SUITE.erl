@@ -148,7 +148,6 @@ request_types(_Config) ->
                         error(waaah);
                     Loop(N) ->
                         case erleans_pm:whereis_name(Grain) of
-                            Pid when is_pid(Pid) -> Pid;
                             Term ->
                                 case partisan_remote_ref:is_pid(Term) of
                                     true ->
@@ -174,7 +173,6 @@ request_types(_Config) ->
                         error(waaah);
                     Loop(N) ->
                         case erleans_pm:whereis_name(Grain) of
-                            Pid when is_pid(Pid) -> Pid;
                             Term ->
                                 case partisan_remote_ref:is_pid(Term) of
                                     true ->
@@ -224,11 +222,15 @@ local_activations(_Config) ->
 
     Self = self(),
     lists:foreach(fun(_) ->
-                          erlang:spawn_link(fun() ->
-                                                    {ok, N} = test_grain:call_counter(Grain1),
-                                                    Self ! N
-                                            end)
-                  end, lists:seq(1,10)),
+        erlang:spawn_link(
+            fun() ->
+                {ok, N} = test_grain:call_counter(Grain1),
+                Self ! N
+            end
+        )
+        end,
+        lists:seq(1,10)
+    ),
     (fun F(10) ->
              ok;
          F(N) ->
