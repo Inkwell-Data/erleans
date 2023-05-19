@@ -141,7 +141,7 @@ whereis_name(#{placement := stateless} = GrainRef) ->
 whereis_name(#{placement := {stateless, _}} = GrainRef) ->
     whereis_stateless(GrainRef);
 
-whereis_name(GrainRef) ->
+whereis_name(#{id := _} = GrainRef) ->
     case lookup(GrainRef) of
         Pids when is_list(Pids) ->
             pick_first_alive(Pids);
