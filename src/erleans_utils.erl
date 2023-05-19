@@ -22,6 +22,8 @@
 
 -export([fun_or_default/3]).
 -export([fun_or_default/5]).
+-export([error/3]).
+
 
 %% If a function is exported by the module return the result of calling it
 %% else return the default.
@@ -32,10 +34,26 @@ fun_or_default(Module, FunctionName, Default) ->
 -spec fun_or_default(module(), atom(), integer(), list(), term()) -> term().
 fun_or_default(Module, FunctionName, Arity, Args, Default) ->
     %% load the module if it isn't already
-    erlang:function_exported(Module, module_info, 0) orelse code:ensure_loaded(Module),
+    erlang:function_exported(Module, module_info, 0)
+        orelse code:ensure_loaded(Module),
+
     case erlang:function_exported(Module, FunctionName, Arity) of
         true ->
             erlang:apply(Module, FunctionName, Args);
         false ->
             Default
     end.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+error(Reason, Args, Cause) when is_list(Args), is_map(Cause) ->
+    erlang:error(
+        Reason,
+        Args,
+        [{error_info, #{cause => Cause}}]
+    ).
+
+
