@@ -327,7 +327,7 @@ handle_cast(_Request, State) ->
     {noreply, NewState :: term()}.
 
 handle_info({'DOWN', MRef, process, Pid, _}, State) ->
-    ?LOG_INFO("Process down ~p", [{Pid, MRef}]),
+    ?LOG_DEBUG("Process down ~p", [{Pid, MRef}]),
     case ets:lookup(?TAB, Pid) of
         [{Pid, GrainRef, MRef}] ->
             ok = local_remove(GrainRef, Pid),
