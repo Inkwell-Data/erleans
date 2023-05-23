@@ -37,6 +37,7 @@
 -export([register_name/1]).
 -export([unregister_name/1]).
 -export([whereis_name/1]).
+-export([whereis_name/2]).
 
 %% called by this module via spawning
 -export([terminator/2]).
@@ -113,31 +114,73 @@ terminator(GrainRef, ProcessRef) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
+%% @doc Returns a process reference for `GrainRef' unless there is no reference
+%% in which case returns `undefined'. This function calls
+%% {@link erlans_pm:whereis_name/2} passing the options `[safe]'.
+%%
+%% Notice that as we use an eventually consistent model and temporarily support
+%% duplicated activations for a grain reference in different locations we could
+%% have multiple instances in the global registry. This function chooses the
+%% first reference in the list that represents a live process. Checking for
+%% liveness incurs in a remote call for remote processes and thus can be
+%% expensive in the presence of multiple instanciations. If you prefer to avoid
+%% this check you can call {@link erlans_pm:whereis_name/2} passing [unsafe] as
+%% the second argument.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec whereis_name(GrainRef :: erleans:grain_ref()) ->
     partisan_remote_ref:p() | undefined.
 
-whereis_name(#{placement := stateless} = GrainRef) ->
+whereis_name(GrainRef) ->
+    whereis_name(GrainRef, [safe]).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns a process reference for `GrainRef' unless there is no reference
+%% in which case returns `undefined'.
+%% If the option `[safe]` is used it will return the process reference only if
+%% its process is alive. Checking for liveness on remote processes incurs a
+%% rmeote call. When there is no connection to the node in which the
+%% process lives, it is deemed dead.
+%%
+%% If Opts is `[]` or `[unsafe]` it will not check for liveness.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec whereis_name(GrainRef :: erleans:grain_ref(), Opts :: [safe | unsafe]) ->
+    partisan_remote_ref:p() | undefined.
+
+whereis_name(#{placement := stateless} = GrainRef, _) ->
     whereis_stateless(GrainRef);
 
-whereis_name(#{placement := {stateless, _}} = GrainRef) ->
+whereis_name(#{placement := {stateless, _}} = GrainRef, _) ->
     whereis_stateless(GrainRef);
 
-whereis_name(#{id := _} = GrainRef) ->
+whereis_name(GrainRef, []) ->
+    whereis_name(GrainRef, [unsafe]);
+
+whereis_name(GrainRef, [_|T] = L) when T =/= [] ->
+    case lists:member(safe, L) of
+        true ->
+            whereis_name(GrainRef, [safe]);
+        false ->
+            whereis_name(GrainRef, [unsafe])
+    end;
+
+whereis_name(#{id := _} = GrainRef, [Flag]) ->
     Opts = [
         {resolver, fun resolver/2},
-        {allow_put, true}
+        {allow_put, false}
     ],
     case global_lookup(GrainRef, Opts) of
-        Pids when is_list(Pids) ->
-            pick_first_alive(Pids);
+        ProcessRefs when is_list(ProcessRefs), Flag == safe ->
+            pick_first_alive(ProcessRefs);
+
+        [ProcessRef|_]  when Flag == unsafe ->
+            ProcessRef;
 
         undefined ->
             undefined
     end.
-
 
 
 
@@ -147,8 +190,7 @@ whereis_name(#{id := _} = GrainRef) ->
 
 
 
--spec init(Args :: term()) ->
-    {ok, State :: term()}.
+-spec init(Args :: term()) -> {ok, State :: term()}.
 
 init(_) ->
     %% Trap exists otherwise terminate/1 won't be called when shutdown by
@@ -305,7 +347,7 @@ handle_info(
         prev_obj => PrevObj
     }),
 
-    Resolved = plum_db_object:resolve(Obj, fun resolver/2),
+    Resolved = plum_db_object:resolve(Obj, fun exclude_dead_resolver/2),
 
     case plum_db_object:value(Resolved) of
         ProcessRefs when is_list(ProcessRefs) ->
@@ -539,7 +581,7 @@ global_add(#{id := _} = GrainRef, Pid) ->
 
 global_lookup(#{id := _} = GrainRef) ->
     Opts = [
-        {resolver, fun resolver/2},
+        {resolver, fun exclude_dead_resolver/2},
         {allow_put, false}
     ],
     global_lookup(GrainRef, Opts).
@@ -605,7 +647,7 @@ do_global_remove(GrainRef, L0, ProcessRef) ->
 %% @end
 %% -----------------------------------------------------------------------------
 resolver(A, B) ->
-    resolver(A, B, fun exclude_dead/1).
+    resolver(A, B, fun(X) -> X end).
 
 
 %% -----------------------------------------------------------------------------
@@ -627,6 +669,22 @@ resolver(L1, L2, Fun) when is_list(L1), is_list(L2), is_function(1, Fun) ->
     maybe_tombstone(Fun(lists:umerge(L1, L2))).
 
 
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+exclude_dead_resolver(A, B) ->
+    resolver(A, B, fun exclude_dead/1).
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+exclude_unreachable_resolver(A, B) ->
+    resolver(A, B, fun exclude_unreachable/1).
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -647,6 +705,30 @@ maybe_tombstone([]) ->
 
 maybe_tombstone(L) ->
     L.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc Returns a new list where all the process references that are local
+%% have been removed.
+%% @end
+%% -----------------------------------------------------------------------------
+exclude_local(undefined) ->
+    [];
+
+exclude_local(ProcessRefs) when is_list(ProcessRefs) ->
+    lists:filter(
+        fun(ProcessRef) ->
+            try
+                not partisan:is_local(ProcessRef)
+            catch
+                _:_ ->
+                    %% A remote process ref in a node we are not connected to
+                    true
+            end
+        end,
+        ProcessRefs
+    ).
 
 
 %% -----------------------------------------------------------------------------
@@ -686,42 +768,12 @@ exclude_dead(ProcessRefs) when is_list(ProcessRefs) ->
     ).
 
 
-is_proc_alive(ProcessRef) ->
-    IsLocal = partisan:is_local(ProcessRef),
-
-    (IsLocal andalso is_monitored(ProcessRef))
-    orelse (not IsLocal andalso partisan:is_process_alive(ProcessRef)).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc Returns a new list where all the process references that are local
-%% have been removed.
-%% @end
-%% -----------------------------------------------------------------------------
-exclude_local(undefined) ->
-    [];
-
-exclude_local(ProcessRefs) when is_list(ProcessRefs) ->
-    lists:filter(
-        fun(ProcessRef) ->
-            try
-                not partisan:is_local(ProcessRef)
-            catch
-                _:_ ->
-                    %% A remote process ref in a node we are not connected to
-                    true
-            end
-        end,
-        ProcessRefs
-    ).
-
-
 %% -----------------------------------------------------------------------------
 %% @private
 %% @doc Returns a new list where all the process references are know to be
-%% exclude_unreachable. A process is reachable if the function
-%% {@link partisan:is_process_alive} returns `true' for that process.
+%% reachable. A process is reachable if the process is local (and alive
+%% according to the existance of a monitor) or is remote and
+%% {@link partisan:is_process_alive/1} returns `true' for that process.
 %% @end
 %% -----------------------------------------------------------------------------
 exclude_unreachable(undefined) ->
@@ -731,7 +783,7 @@ exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
     lists:filter(
         fun(ProcessRef) ->
             try
-                partisan:is_process_alive(ProcessRef)
+                is_proc_alive(ProcessRef)
             catch
                 _:_ ->
                     false
@@ -740,6 +792,19 @@ exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
         ProcessRefs
     ).
 
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec is_proc_alive(partisan_remote_ref:p()) -> boolean() | no_return().
+
+is_proc_alive(ProcessRef) ->
+    IsLocal = partisan:is_local(ProcessRef),
+
+    (IsLocal andalso is_monitored(ProcessRef))
+    orelse (not IsLocal andalso partisan:is_process_alive(ProcessRef)).
 
 
 %% -----------------------------------------------------------------------------
