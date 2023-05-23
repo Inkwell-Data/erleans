@@ -658,13 +658,13 @@ resolver(A, B) ->
 resolver(?TOMBSTONE, ?TOMBSTONE, _) ->
     ?TOMBSTONE;
 
-resolver(?TOMBSTONE, L, Fun) when is_list(L), is_function(1, Fun) ->
+resolver(?TOMBSTONE, L, Fun) when is_list(L), is_function(Fun, 1) ->
     maybe_tombstone(Fun(L));
 
-resolver(L, ?TOMBSTONE, Fun) when is_list(L), is_function(1, Fun) ->
+resolver(L, ?TOMBSTONE, Fun) when is_list(L), is_function(Fun, 1) ->
     maybe_tombstone(Fun(L));
 
-resolver(L1, L2, Fun) when is_list(L1), is_list(L2), is_function(1, Fun) ->
+resolver(L1, L2, Fun) when is_list(L1), is_list(L2), is_function(Fun, 1) ->
     %% Lists are sorted already as we sort them every time we do a put
     maybe_tombstone(Fun(lists:umerge(L1, L2))).
 
