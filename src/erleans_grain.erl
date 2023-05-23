@@ -244,7 +244,6 @@ init(Parent, GrainRef) ->
         #{placement := {stateless, _N}} ->
             init_(Parent, GrainRef);
         _ ->
-            Self = self(),
             case erleans_pm:register_name(GrainRef) of
                 ok ->
                     init_(Parent, GrainRef);
