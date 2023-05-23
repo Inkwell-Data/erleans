@@ -25,6 +25,12 @@
 
 -define(PDB_PREFIX, {?MODULE, grain_ref}).
 -define(TAB, ?MODULE).
+-define(TOMBSTONE, '$deleted').
+
+%% This server may receive a huge amount of messages.
+%% Make sure that they are stored off heap to avoid exessive GCs.
+-define(SPAWN_OPTS, [{spawn_opt, [{message_queue_data, off_heap}]}]).
+
 
 %% called by erleans
 -export([start_link/0]).
@@ -37,6 +43,7 @@
 
 %% PARTISAN_GEN_SERVER CALLBACKS
 -export([init/1]).
+-export([handle_continue/2]).
 -export([handle_call/3]).
 -export([handle_cast/2]).
 -export([handle_info/2]).
@@ -47,7 +54,7 @@
 
 -dialyzer({nowarn_function, register_name/1}).
 
--define(TOMBSTONE, '$deleted').
+
 
 
 
@@ -62,7 +69,7 @@
 %% @end
 %% -----------------------------------------------------------------------------
 start_link() ->
-    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, [], ?SPAWN_OPTS).
 
 
 %% -----------------------------------------------------------------------------
@@ -133,6 +140,7 @@ whereis_name(#{id := _} = GrainRef) ->
 
 
 
+
 %% =============================================================================
 %% PARTISAN_GEN_SERVER BEHAVIOR CALLBACKS
 %% =============================================================================
@@ -143,6 +151,10 @@ whereis_name(#{id := _} = GrainRef) ->
     {ok, State :: term()}.
 
 init(_) ->
+    %% Trap exists otherwise terminate/1 won't be called when shutdown by
+    %% supervisor
+    erlang:process_flag(trap_exit, true),
+
     case ets:info(?TAB, name) of
         undefined ->
             Opts = [
@@ -164,7 +176,43 @@ init(_) ->
         [true]
     }],
     ok = plum_db_events:subscribe(object_update, MS),
-    {ok, _State = #{}}.
+    State = #{},
+    {ok, State, {continue, global_cleanup}}.
+
+
+handle_continue(global_cleanup, State) ->
+    %% We remove all local references from the global registry. These would be
+    %% references that we were not able to remove on terminate/2 e.g. network
+    %% split when shutdown/crash occured.
+    Fun = fun
+        ({_, []}) ->
+            ok;
+
+        ({GrainRef, ProcessRefs0}) when is_list(ProcessRefs0) ->
+            %% We update the record by removing any local reference.
+            %% We do not need to check with the local registry (ets table) as
+            %% this call occurs before any other process could call
+            %% register_name.
+            ProcessRefs = lists:usort(exclude_local(ProcessRefs0)),
+            plum_db:put(?PDB_PREFIX, GrainRef, ProcessRefs)
+    end,
+
+    %% We use the exclude_local_resolver/2 to avoid making a remote call to
+    %% check on process liveness for remote process as we only care about
+    %% removing instances of previous local processes
+    Opts = [
+        {remove_tombstones, true},
+        {resolver, fun exclude_local_resolver/2},
+        {allow_put, false}
+    ],
+
+    ok = plum_db:foreach(Fun, ?PDB_PREFIX, Opts),
+
+    {noreply, State};
+
+handle_continue(_, State) ->
+    {noreply, State}.
+
 
 
 handle_call({register_name, GrainRef}, {Caller, _}, State)
@@ -280,6 +328,7 @@ handle_info(_, State) ->
 
 terminate(_Reason, _State) ->
     ok = unregister_all().
+
 
 
 %% =============================================================================
@@ -549,23 +598,43 @@ do_global_remove(GrainRef, L0, ProcessRef) ->
             ok = plum_db:put(?PDB_PREFIX, GrainRef, lists:usort(L1))
     end.
 
+
 %% -----------------------------------------------------------------------------
 %% @private
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-resolver(?TOMBSTONE, ?TOMBSTONE) ->
+resolver(A, B) ->
+    resolver(A, B, fun exclude_dead/1).
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+resolver(?TOMBSTONE, ?TOMBSTONE, _) ->
     ?TOMBSTONE;
 
-resolver(?TOMBSTONE, L) when is_list(L) ->
-    maybe_tombstone(exclude_dead(L));
+resolver(?TOMBSTONE, L, Fun) when is_list(L), is_function(1, Fun) ->
+    maybe_tombstone(Fun(L));
 
-resolver(L, ?TOMBSTONE) when is_list(L) ->
-    maybe_tombstone(exclude_dead(L));
+resolver(L, ?TOMBSTONE, Fun) when is_list(L), is_function(1, Fun) ->
+    maybe_tombstone(Fun(L));
 
-resolver(L1, L2) when is_list(L1) andalso is_list(L2) ->
+resolver(L1, L2, Fun) when is_list(L1), is_list(L2), is_function(1, Fun) ->
     %% Lists are sorted already as we sort them every time we do a put
-    maybe_tombstone(exclude_dead(lists:umerge(L1, L2))).
+    maybe_tombstone(Fun(lists:umerge(L1, L2))).
+
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+exclude_local_resolver(A, B) ->
+    resolver(A, B, fun exclude_local/1).
 
 
 %% -----------------------------------------------------------------------------
@@ -621,8 +690,7 @@ is_proc_alive(ProcessRef) ->
     IsLocal = partisan:is_local(ProcessRef),
 
     (IsLocal andalso is_monitored(ProcessRef))
-    orelse
-    (not IsLocal andalso partisan:is_process_alive(ProcessRef)).
+    orelse (not IsLocal andalso partisan:is_process_alive(ProcessRef)).
 
 
 %% -----------------------------------------------------------------------------
@@ -638,7 +706,7 @@ exclude_local(ProcessRefs) when is_list(ProcessRefs) ->
     lists:filter(
         fun(ProcessRef) ->
             try
-                not partisan:is_local_pid(ProcessRef)
+                not partisan:is_local(ProcessRef)
             catch
                 _:_ ->
                     %% A remote process ref in a node we are not connected to
