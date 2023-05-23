@@ -212,8 +212,8 @@ init(_) ->
             ok
     end,
     MS = [{
-        %% {{{_, _} = FullPrefix, Key}, NewObj, ExistingObj}
-        {{{erleans_pm, grain_ref}, '_'}, '_', '_'},
+        %% {{FullPrefix, Key}, NewObj, ExistingObj}
+        {{?PDB_PREFIX, '_'}, '_', '_'},
         [],
         [true]
     }],
