@@ -294,7 +294,7 @@ when is_pid(Caller) ->
             );
         [{GrainRef, Pid, MRef}] when Pid == Caller ->
             _ = erlang:demonitor(MRef),
-            true = local_remove(GrainRef, Pid),
+            ok = local_remove(GrainRef, Pid),
             ok = global_remove(GrainRef, Pid);
 
         [{GrainRef, Pid, _}] when Pid =/= Caller ->
@@ -820,7 +820,7 @@ unregister_all() ->
 unregister_all(Pid) when is_pid(Pid) ->
     GrainRef = ets:lookup_element(?TAB, Pid, 2),
     ok = global_remove(GrainRef, Pid),
-    true = local_remove(GrainRef, Pid),
+    ok = local_remove(GrainRef, Pid),
     unregister_all(ets:next(?TAB, Pid));
 
 unregister_all(#{id := _} = GrainRef) ->
