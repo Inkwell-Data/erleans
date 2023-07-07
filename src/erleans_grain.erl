@@ -63,9 +63,20 @@
                   {info, Msg :: term()} |
                   save_state.
 
+
+
+
+%% =============================================================================
+%% BEHAVIOUR CALLBACKS
+%% =============================================================================
+
+
+
 -callback provider() -> module().
 
 -callback placement() -> erleans:grain_placement().
+
+-callback options() -> #{channel := partisan:channel()}.
 
 -callback state(Id :: term()) -> term().
 
@@ -239,20 +250,24 @@ init(Args) ->
 init(Parent, GrainRef) ->
     put(grain_ref, GrainRef),
     process_flag(trap_exit, true),
+    Mod = maps:get(implementing_module, GrainRef),
+    Placement = maps:get(placement, GrainRef),
 
-    case GrainRef of
-        #{placement := {stateless, _N}} ->
+    ok = set_partisan_channel(Mod),
+
+    case Placement of
+        {stateless, _N} ->
             init_(Parent, GrainRef);
         _ ->
             case erleans_pm:register_name(GrainRef) of
                 ok ->
                     init_(Parent, GrainRef);
                 {error, {already_in_use, ProcessRef}} ->
-                    proc_lib:init_ack(
+                    partisan_proc_lib:init_ack(
                         Parent, {error, {already_started, ProcessRef}}
                     );
                 {error, Reason} ->
-                    proc_lib:init_ack(Parent, {error, Reason})
+                    partisan_proc_lib:init_ack(Parent, {error, Reason})
             end
     end.
 
@@ -280,7 +295,7 @@ init_(Parent, GrainRef) ->
 
     case CbData of
         notfound ->
-            proc_lib:init_ack(Parent, ignore);
+            partisan_proc_lib:init_ack(Parent, ignore);
         _ ->
             Value = erleans_utils:fun_or_default(
                 CbModule, activate, 2, [GrainRef, CbData], {ok, CbData, #{}}
@@ -298,11 +313,11 @@ init_(Parent, GrainRef) ->
                     %% `exit({noproc, notfound})`
                     %% from `erleans_grain`
                     maybe_unregister(get(grain_ref)),
-                    proc_lib:init_ack(Parent, ignore);
+                    partisan_proc_lib:init_ack(Parent, ignore);
 
                 {error, Reason} ->
                     maybe_unregister(get(grain_ref)),
-                    proc_lib:init_ack(Parent, {error, Reason})
+                    partisan_proc_lib:init_ack(Parent, {error, Reason})
             end
     end.
 
@@ -328,7 +343,7 @@ verify_and_enter_loop(Parent, GrainRef, CbModule, Id, Provider, ETag, GrainOpts,
                  create_time      = CreateTime,
                  deactivate_after = case DeactivateAfter of 0 -> infinity; _ -> DeactivateAfter end
                 },
-    proc_lib:init_ack(Parent, {ok, self()}),
+    partisan_proc_lib:init_ack(Parent, {ok, self()}),
     partisan_gen_statem:enter_loop(?MODULE, [], active, Data).
 
 callback_mode() ->
@@ -590,3 +605,13 @@ maybe_crash({error, Reason}) ->
     exit(Reason);
 maybe_crash(_) ->
     ok.
+
+
+%% @private
+set_partisan_channel(Mod) ->
+    case erleans_utils:fun_or_default(Mod, options, #{}) of
+        #{channel := Channel} ->
+            partisan_gen:set_opts([channel, Channel]);
+        _ ->
+            ok
+    end.
