@@ -95,7 +95,7 @@ register_name(GrainRef) ->
     ok | no_return().
 
 unregister_name(#{id := _} = GrainRef) ->
-    partisan_gen_server:call(?MODULE, {register_name, GrainRef}).
+    partisan_gen_server:call(?MODULE, {unregister_name, GrainRef}).
 
 
 %% -----------------------------------------------------------------------------
