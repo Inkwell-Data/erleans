@@ -16,7 +16,7 @@
 
 -module(erleans_grain_sup).
 
--behaviour(supervisor).
+-behaviour(partisan_gen_supervisor).
 
 -export([start_link/0,
          start_child/1,
@@ -28,19 +28,19 @@
 
 -spec start_link() -> {ok, pid()}.
 start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+    partisan_gen_supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 -spec start_child(GrainRef :: erleans:grain_ref())
-                 -> {ok, pid() | undefined} | {error, supervisor:startchild_err()}.
+                 -> {ok, pid() | undefined} | {error, partisan_gen_supervisor:startchild_err()}.
 start_child(GrainRef) ->
     ?LOG_INFO("local_grain=~p", [GrainRef]),
-    supervisor:start_child(?MODULE, [GrainRef]).
+    partisan_gen_supervisor:start_child(?MODULE, [GrainRef]).
 
 -spec start_child(Node :: node(), GrainRef :: erleans:grain_ref())
-                 -> {ok, pid() | undefined} | {error, supervisor:startchild_err()}.
+                 -> {ok, pid() | undefined} | {error, partisan_gen_supervisor:startchild_err()}.
 start_child(Node, GrainRef) ->
     ?LOG_INFO("node=~p grain=~p", [Node, GrainRef]),
-    supervisor:start_child({?MODULE, Node}, [GrainRef]).
+    partisan_gen_supervisor:start_child({?MODULE, Node}, [GrainRef]).
 
 init([]) ->
     SupFlags = #{strategy => simple_one_for_one,
