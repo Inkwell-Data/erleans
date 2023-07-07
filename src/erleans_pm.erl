@@ -267,9 +267,15 @@ when is_pid(Caller) ->
                 ok ->
                     global_add(GrainRef, Caller);
 
-                {error, {already_in_use, _}} = Error ->
-                    %% Some other process beat us in calling local_add
-                    Error
+                {error, {already_in_use, ProcessRef}} = Error ->
+                    case partisan:is_local_pid(ProcessRef, Caller) of
+                        true ->
+                            %% This should not happen, but just in case
+                            ok;
+                        false ->
+                            %% Some other process beat us in calling local_add
+                            Error
+                    end
             end;
 
         [ProcessRef|_] ->
