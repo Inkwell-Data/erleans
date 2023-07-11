@@ -34,7 +34,7 @@
   0},
  {<<"plum_db">>,
   {git,"https://github.com/leapsight/plum_db.git",
-       {ref,"96a796ed172dcb647369c39ed947d5778faf3fa7"}},
+       {ref,"12726a591d6d3f597f58679da2bbc7395cd96c58"}},
   0},
  {<<"quickrand">>,{pkg,<<"quickrand">>,<<"2.0.5">>},1},
  {<<"recon">>,{pkg,<<"recon">>,<<"2.5.3">>},1},
