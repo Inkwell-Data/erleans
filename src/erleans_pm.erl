@@ -517,7 +517,7 @@ local_add(GrainRef, Pid) ->
             Objects = [{Pid, GrainRef, Ref}, {GrainRef, Pid, Ref}],
             true = ets:insert(?TAB, Objects),
             ok;
-        [{OtherPid, GrainRef, _}] ->
+        [{GrainRef, OtherPid, _}] ->
             {error, {already_in_use, partisan_remote_ref:from_term(OtherPid)}}
     end.
 
