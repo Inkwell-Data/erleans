@@ -23,7 +23,8 @@
          handle_cast/2,
          deactivate/1]).
 
--include("erleans.hrl").
+-include_lib("erleans/include/erleans.hrl").
+%% -include("erleans.hrl").
 
 placement() ->
     prefer_local.
