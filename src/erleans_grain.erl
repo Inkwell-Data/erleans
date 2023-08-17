@@ -33,6 +33,7 @@
 
 
 -export([start_link/1,
+         grain_ref/1,
          call/2,
          call/3,
          cast/2]).
@@ -131,6 +132,30 @@
 -spec start_link(GrainRef :: erleans:grain_ref()) -> {ok, pid() | undefined} | {error, any()}.
 start_link(GrainRef) ->
     proc_lib:start_link(?MODULE, init, [self(), GrainRef]).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec grain_ref(partisan:any_pid()) -> erleans:grain_ref() | no_return().
+
+grain_ref(Pid) when is_pid(Pid) ->
+    grain_ref(partisan_remote_ref:from_term(Pid));
+
+grain_ref(Process) ->
+    partisan:is_pid(Process) orelse error({badarg, [Process]}),
+
+    try
+        partisan_gen_statem:call(
+            Process, {?current_span_ctx, req_type(), grain_ref}, ?DEFAULT_TIMEOUT
+        )
+    catch
+        exit:{bad_etag, _} ->
+             ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
+             {exit, saved_etag_changed}
+    end.
+
 
 -spec call(GrainRef :: erleans:grain_ref(), Request :: term()) -> Reply :: term().
 call(GrainRef, Request) ->
@@ -259,7 +284,7 @@ init(Parent, GrainRef) ->
         {stateless, _N} ->
             init_(Parent, GrainRef);
         _ ->
-            case erleans_pm:register_name(GrainRef) of
+            case erleans_pm:register_name() of
                 ok ->
                     init_(Parent, GrainRef);
                 {error, {already_in_use, ProcessRef}} ->
@@ -351,6 +376,15 @@ callback_mode() ->
 
 active(enter, _OldState, Data=#data{deactivate_after=DeactivateAfter}) ->
     {keep_state, Data, [{state_timeout, DeactivateAfter, activation_expiry}]};
+
+active({call, From}, {_, ReqType, grain_ref}, #data{} = Data) ->
+    CbData = Data#data.cb_state,
+    maybe_crash(CbData),
+    Result = {ok, CbData, [{reply, From, get(grain_ref)}]},
+    handle_result(
+        Result, Data, upd_timer(ReqType, Data#data.deactivate_after)
+    );
+
 active({call, From}, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                            cb_state=CbData,
                                                            deactivate_after=DeactivateAfter}) ->
@@ -464,8 +498,8 @@ maybe_remove_worker(_) ->
 
 maybe_unregister(#{placement := {stateless, _}}) ->
     ok;
-maybe_unregister(GrainRef) ->
-    _ = catch erleans_pm:unregister_name(GrainRef),
+maybe_unregister(_GrainRef) ->
+    _ = catch erleans_pm:unregister_name(),
     ok.
 
 upd_timer(leave_timer, _) ->

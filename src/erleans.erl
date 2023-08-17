@@ -18,7 +18,7 @@
 %%% ---------------------------------------------------------------------------
 -module(erleans).
 
--export([get_grain/2]).
+-export([get_grain/2, grain_ref/0]).
 
 -include("erleans.hrl").
 
@@ -50,6 +50,25 @@ get_grain(ImplementingModule, Id) ->
         _ ->
             BaseGrainRef#{provider => provider(ImplementingModule)}
     end.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns the grain_ref of the calling process. Returns 'undefined' if the
+%% calling process is not an {@link erleans_grain}.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec grain_ref() -> grain_ref() | undefined.
+
+grain_ref() ->
+    get(grain_ref).
+
+
+
+%% =============================================================================
+%% PRIVATE
+%% =============================================================================
+
+
 
 -spec provider(module()) -> provider().
 provider(CbModule) ->

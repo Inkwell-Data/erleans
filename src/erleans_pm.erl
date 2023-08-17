@@ -21,7 +21,9 @@
 -module(erleans_pm).
 -behavior(partisan_gen_server).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("partisan/include/partisan.hrl").
+-include("erleans.hrl").
 
 -define(PDB_PREFIX, {?MODULE, grain_ref}).
 -define(TAB, ?MODULE).
@@ -32,15 +34,12 @@
 -define(SPAWN_OPTS, [{spawn_opt, [{message_queue_data, off_heap}]}]).
 
 
-%% called by erleans
+%% API
 -export([start_link/0]).
--export([register_name/1]).
--export([unregister_name/1]).
+-export([register_name/0]).
+-export([unregister_name/0]).
 -export([whereis_name/1]).
 -export([whereis_name/2]).
-
-%% called by this module via spawning
--export([terminator/2]).
 
 %% PARTISAN_GEN_SERVER CALLBACKS
 -export([init/1]).
@@ -50,10 +49,20 @@
 -export([handle_info/2]).
 -export([terminate/2]).
 
--include("erleans.hrl").
--include_lib("kernel/include/logger.hrl").
+%% PRIVATE API CALLED INTERNALLY VIA SPAWNING
+-export([terminator/2]).
 
--dialyzer({nowarn_function, register_name/1}).
+%% TEST API
+-ifdef(TEST).
+
+-export([register_name/1]).
+-export([unregister_name/1]).
+-dialyzer({nowarn_function, register_name/0}).
+
+-endif.
+
+
+-dialyzer({nowarn_function, register_name/0}).
 
 
 
@@ -74,27 +83,45 @@ start_link() ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Registers the calling process with the `id' attribute of `GrainRef'.
+%% @doc Registers the calling process with the `id' attribute it
+%% `erleans:grain_ref()'.
+%% This call is serialised through a server process.
+%%
+%% Returns an error with the following reasons:
+%% <ul>
+%% <li>`{already_in_use, partisan_remote_ref:p()}' if there is already a process
+%% registered for the same `erleans:grain_ref()'.</li>
+%% %% <li>`badgrain' if the calling process is not an {@link erleans_grain}</li>
+%% </ul>
+%% @end
+%% -----------------------------------------------------------------------------
+-spec register_name() ->
+    ok
+    | {error, badgrain}
+    | {error, {already_in_use, partisan_remote_ref:p()}}.
+
+register_name() ->
+    case erleans:grain_ref() of
+        undefined ->
+            {error, badgrain};
+        GrainRef ->
+            partisan_gen_server:call(?MODULE, {register_name, GrainRef})
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Unregisters a grain. This call fails with `badgrain' if the calling
+%% process is not an {@link erleans_grain}.
 %% This call is serialised through a server process.
 %% @end
 %% -----------------------------------------------------------------------------
--spec register_name(GrainRef :: erleans:grain_ref()) ->
-    ok | {error, {already_in_use, partisan_remote_ref:p()}}.
-
-register_name(GrainRef) ->
-    partisan_gen_server:call(?MODULE, {register_name, GrainRef}).
-
-
-
-%% -----------------------------------------------------------------------------
-%% @doc It can only be called by the caller
-%% This call is serialised through a server process.
-%% @end
-%% -----------------------------------------------------------------------------
--spec unregister_name(GrainRef :: erleans:grain_ref()) ->
+-spec unregister_name() ->
     ok | no_return().
 
-unregister_name(#{id := _} = GrainRef) ->
+unregister_name() ->
+    GrainRef = erleans:grain_ref(),
+    GrainRef =/= undefined orelse error(badgrain),
+
     partisan_gen_server:call(?MODULE, {unregister_name, GrainRef}).
 
 
@@ -140,7 +167,7 @@ whereis_name(GrainRef) ->
 %% in which case returns `undefined'.
 %% If the option `[safe]` is used it will return the process reference only if
 %% its process is alive. Checking for liveness on remote processes incurs a
-%% rmeote call. When there is no connection to the node in which the
+%% remote call. If there is no connection to the node in which the
 %% process lives, it is deemed dead.
 %%
 %% If Opts is `[]` or `[unsafe]` it will not check for liveness.
@@ -173,7 +200,7 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
     ],
     case global_lookup(GrainRef, Opts) of
         ProcessRefs when is_list(ProcessRefs), Flag == safe ->
-            pick_first_alive(ProcessRefs);
+            safe_pick(ProcessRefs, GrainRef);
 
         [ProcessRef|_]  when Flag == unsafe ->
             ProcessRef;
@@ -471,18 +498,18 @@ terminate_grains(GrainRef, ProcessRefs) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-pick_first_alive([]) ->
+safe_pick([], _) ->
     undefined;
 
-pick_first_alive([ProcessRef | Rest]) ->
+safe_pick([ProcessRef | Rest], GrainRef) ->
     try is_proc_alive(ProcessRef) of
         true ->
             ProcessRef;
         false ->
-            pick_first_alive(Rest)
+            safe_pick(Rest, GrainRef)
     catch
         error:_ ->
-            pick_first_alive(Rest)
+            safe_pick(Rest, GrainRef)
     end.
 
 
@@ -810,10 +837,25 @@ exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
 -spec is_proc_alive(partisan_remote_ref:p()) -> boolean() | no_return().
 
 is_proc_alive(ProcessRef) ->
+    is_proc_alive(ProcessRef, undefined).
+
+
+-spec is_proc_alive(partisan_remote_ref:p(), erleans:grain_ref() | undefined) ->
+    boolean() | no_return().
+
+is_proc_alive(ProcessRef, undefined) ->
     IsLocal = partisan:is_local(ProcessRef),
 
     (IsLocal andalso is_monitored(ProcessRef))
-    orelse (not IsLocal andalso partisan:is_process_alive(ProcessRef)).
+    orelse (not IsLocal andalso partisan:is_process_alive(ProcessRef));
+
+is_proc_alive(ProcessRef, GrainRef) ->
+    try
+        GrainRef == erleans_grain:grain_ref(ProcessRef)
+    catch
+        _:_ ->
+            false
+    end.
 
 
 %% -----------------------------------------------------------------------------
@@ -840,5 +882,46 @@ unregister_all(#{id := _} = GrainRef) ->
 unregister_all('$end_of_table') ->
     true = ets:safe_fixtable(?TAB, false),
     ok.
+
+
+
+
+%% =============================================================================
+%% TEST
+%% =============================================================================
+
+
+
+
+-ifdef(TEST).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Registers the calling process with the `id' attribute of `GrainRef'.
+%% This call is serialised through a server process.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec register_name(GrainRef :: erleans:grain_ref()) ->
+    ok
+    | {error, {already_in_use, partisan_remote_ref:p()}}.
+
+register_name(GrainRef) ->
+    partisan_gen_server:call(?MODULE, {register_name, GrainRef}).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc It can only be called by the caller
+%% This call is serialised through a server process.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec unregister_name(GrainRef :: erleans:grain_ref()) ->
+    ok | no_return().
+
+unregister_name(#{id := _} = GrainRef) ->
+    partisan_gen_server:call(?MODULE, {unregister_name, GrainRef}).
+
+
+-endif.
+
 
 
