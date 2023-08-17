@@ -195,7 +195,7 @@ start_timer(StartTime, Timer) ->
                    %% requests to a grain from a timer callback
                    %% do not reset the activation expiry timer
                    put(req_type, leave_timer),
-                   Now = erlang:monotonic_time(milli_seconds),
+                   Now = erlang:monotonic_time(millisecond),
                    FirstFire = Now + StartTime,
                    erlang:send_after(FirstFire, self(), ?tick,
                                      [{abs, true}]),
