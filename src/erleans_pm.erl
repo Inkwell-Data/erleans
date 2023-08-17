@@ -236,7 +236,10 @@ handle_continue(global_cleanup, State) ->
             %% this call occurs before any other process could call
             %% register_name.
             ProcessRefs = lists:usort(exclude_local(ProcessRefs0)),
-            plum_db:put(?PDB_PREFIX, GrainRef, ProcessRefs)
+            plum_db:put(?PDB_PREFIX, GrainRef, ProcessRefs);
+
+        ({error, badresolver}) ->
+            ok
     end,
 
     %% We use the exclude_local_resolver/2 to avoid making a remote call to
