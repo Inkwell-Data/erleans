@@ -107,7 +107,8 @@ timer_shutdown(_Config) ->
 
     ?g:long_timer(Grain),
 
-    timer:sleep(80),  % sleep till we should be way shut down, but timer should keep us awake
+    %% sleep till we should be way shut down, but timer should keep us awake
+    timer:sleep(80),
 
     %% recover
     ?g:node(Grain),

@@ -15,7 +15,8 @@
 %%%----------------------------------------------------------------------------
 
 %%% ---------------------------------------------------------------------------
-%%% @doc Erleans Grain process manager.
+%%% @doc Erleans Grain process registry.
+%%%
 %%% @end
 %%% ---------------------------------------------------------------------------
 -module(erleans_pm).
@@ -212,7 +213,9 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Returns the `erleans:grain_ref' for a Pid.
+%% @doc Returns the `erleans:grain_ref' for a Pid. This is more efficient than
+%% {@link erleans_grain:grain_ref} as it is not calling the grain (which might
+%% be busy handling signals) but using this modules ets table.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec grain_ref(partisan:any_pid()) ->
@@ -275,9 +278,14 @@ init(_) ->
 
 
 handle_continue(global_cleanup, State) ->
+    %% This prevents any grain to be registered as we are blocking the server
+    %% until we finish.
     %% We remove all local references from the global registry. These would be
-    %% references that we were not able to remove on terminate/2 e.g. network
-    %% split when shutdown/crash occured.
+    %% references that we were not able to remove on terminate/2 the last time
+    %% we shutdown/crashed e.g. gossip message loss and/or network split when
+    %% shutdown/crash occured.
+    %%
+    %% TODO for this to work properly we need to manually perform an AAE here
     Fun = fun
         ({_, []}) ->
             ok;
@@ -919,16 +927,19 @@ is_proc_alive(ProcessRef) ->
     boolean() | no_return().
 
 is_proc_alive(ProcessRef, undefined) ->
-    IsLocal = partisan:is_local(ProcessRef),
-
-    (IsLocal andalso is_monitored(ProcessRef))
-    orelse (not IsLocal andalso partisan:is_process_alive(ProcessRef));
+    case partisan:is_local(ProcessRef) of
+        true ->
+            is_monitored(ProcessRef);
+        false ->
+            partisan:is_process_alive(ProcessRef)
+    end;
 
 is_proc_alive(ProcessRef, GrainRef) ->
     case grain_ref(ProcessRef) of
         {ok, GrainRef} ->
             true;
         {ok, _} ->
+            %% TODO send a cast to delete this entry!
             false;
         {error, _} ->
             false
@@ -946,6 +957,7 @@ unregister_all() ->
     unregister_all(ets:first(?TAB)).
 
 unregister_all(Pid) when is_pid(Pid) ->
+    %% {pg, Pid, GrainRef, MRef}
     GrainRef = ets:lookup_element(?TAB, Pid, 3),
     ok = global_remove(GrainRef, Pid),
     ok = local_remove(GrainRef, Pid),
