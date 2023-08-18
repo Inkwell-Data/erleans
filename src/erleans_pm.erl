@@ -223,17 +223,27 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
     | {error, timeout | any()}.
 
 grain_ref(Pid) when is_pid(Pid) ->
-    local_grain_ref(Pid);
+    case ets:lookup(?TAB, Pid) of
+        [] ->
+            {error, not_found};
+        [{pg, Pid, GrainRef, _}] ->
+            {ok, GrainRef}
+    end;
 
 grain_ref(Process) ->
-    try partisan:is_local_pid(Process) of
+    partisan:is_pid(Process) orelse error({badarg, [Process]}),
+    Node = partisan:node(Process),
+
+    case Node == partisan:node() of
         true ->
             grain_ref(partisan_remote_ref:to_term(Process));
         false ->
-            remote_grain_ref(Process)
-    catch
-        error:_ ->
-            error({badarg, [Process]})
+            case partisan_rpc:call(Node, ?MODULE, grain_ref, [Process], 5000) of
+                {badrpc, Reason} ->
+                    {error, Reason};
+                Result ->
+                    Result
+            end
     end.
 
 
@@ -876,35 +886,6 @@ exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
         end,
         ProcessRefs
     ).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-local_grain_ref(Process) ->
-    case ets:lookup(?TAB, Process) of
-        [] ->
-            {error, not_found};
-        [{pg, Process, GrainRef, _}] ->
-            {ok, GrainRef}
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-remote_grain_ref(Process) ->
-    Node = partisan:node(Process),
-    case partisan_rpc:call(Node, ?MODULE, local_grain_ref, [Process], 5000) of
-        {badrpc, Reason} ->
-            {error, Reason};
-        Result ->
-            Result
-    end.
 
 
 %% -----------------------------------------------------------------------------
