@@ -878,7 +878,6 @@ exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
 local_grain_ref(Process) ->
     case ets:lookup(?TAB, Process) of
         [] ->
-            error({ets, Process, ets:tab2list(?TAB)}),
             {error, not_found};
         [{pg, Process, GrainRef, _}] ->
             {ok, GrainRef}
