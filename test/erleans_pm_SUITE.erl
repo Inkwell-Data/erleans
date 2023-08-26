@@ -24,7 +24,8 @@ groups() ->
             whereis_name,
             already_in_use,
             stale_local_entry,
-            unreachable_remote_entry
+            unreachable_remote_entry,
+            reachable_stale_remote_entry
         ]}
     ].
 
@@ -35,7 +36,6 @@ init_per_group(_, Config) ->
     application:set_env(erleans, deactivate_after, ?DEACTIVATE_AFTER),
     {ok, _} = application:ensure_all_started(plum_db),
     {ok, _} = application:ensure_all_started(erleans),
-
     GrainRef = erleans:get_grain(test_grain, <<"grain1">>),
     [{grainref, GrainRef}|Config].
 
@@ -139,7 +139,7 @@ unreachable_remote_entry(Config) ->
     ?assertMatch(
         undefined,
         erleans_pm:whereis_name(GrainRef, [safe]),
-        "Should be unreachable and considered dead"
+        "Should be unreachable and considered dead becuase node is not connected"
     ),
 
     {ok, 2} = test_grain:call_counter(GrainRef),
@@ -164,6 +164,55 @@ unreachable_remote_entry(Config) ->
     ),
 
     ok = plum_db:delete(?PDB_PREFIX, GrainRef).
+
+
+reachable_stale_remote_entry(Config) ->
+    GrainRef = ?config(grainref, Config),
+
+    %% We simulate a previous registration. This case can happen
+    %% when there was a registration on a previous instantiation of a node
+    %% that remained in the global store (another node's replica)
+    %% and re-emerges here via active anti-entropy (plum_db).
+    [_|PidStr] = partisan:self(),
+    Node = 'foo@127.0.0.1',
+    PidRef1 = [Node|PidStr],
+    plum_db:put(?PDB_PREFIX, GrainRef, [PidRef1]),
+
+
+    meck:new(erleans_pm, [passthrough]),
+    meck:expect(erleans_pm, grain_ref,
+        fun
+            (Pid) when is_pid(Pid) ->
+                meck:passthrough(Pid);
+
+            (PidRef) ->
+                case partisan:node(PidRef) == partisan:node() of
+                    true ->
+                        meck:passthrough(partisan_remote_ref:to_term(PidRef));
+                    false ->
+                        %% We simulate the remote grain is reachable and returns
+                        %% a diff Ref
+                        GrainRef#{id => foo}
+                end
+        end
+    ),
+
+    ?assertMatch(
+        PidRef1,
+        erleans_pm:whereis_name(GrainRef, [unsafe]),
+        "Should return Pid even though is the wrong one as it is associated "
+        "with a different Grain, but based on our copy of the global store it "
+        "is still associated with it"
+    ),
+
+    ?assertMatch(
+        undefined,
+        erleans_pm:whereis_name(GrainRef, [safe]),
+        "Should be unreachable and considered dead becuase node is not connected"
+    ),
+
+    ok.
+
 
 
 
