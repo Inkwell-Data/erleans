@@ -185,7 +185,7 @@ whereis_name(#{placement := {stateless, _}} = GrainRef, _) ->
     whereis_stateless(GrainRef);
 
 whereis_name(GrainRef, []) ->
-    whereis_name(GrainRef, [unsafe]);
+    whereis_name(GrainRef, [safe]);
 
 whereis_name(GrainRef, [_|T] = L) when T =/= [] ->
     case lists:member(safe, L) of
