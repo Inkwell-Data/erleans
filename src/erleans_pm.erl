@@ -215,7 +215,7 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
 %% -----------------------------------------------------------------------------
 %% @doc Returns the `erleans:grain_ref' for a Pid. This is more efficient than
 %% {@link erleans_grain:grain_ref} as it is not calling the grain (which might
-%% be busy handling signals) but using this modules ets table.
+%% be busy handling signals) but using this module's ets table.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec grain_ref(partisan:any_pid()) ->
