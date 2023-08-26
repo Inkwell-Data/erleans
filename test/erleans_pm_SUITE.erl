@@ -111,7 +111,10 @@ already_in_use(Config) ->
 stale_local_entry(Config) ->
     GrainRef = ?config(grainref, Config),
 
-    %% We simulate a previous local reg
+    %% We simulate a previous local registration. This case can happen
+    %% when there was a registration on a previous instantiation of this node
+    %% that remained in the global store (another node's replica)
+    %% and re-emerges here via active anti-entropy (plum_db).
     ok = plum_db:put(?PDB_PREFIX, GrainRef, [partisan:self()]),
 
     ?assertMatch(
@@ -126,15 +129,17 @@ stale_local_entry(Config) ->
 unreachable_remote_entry(Config) ->
     GrainRef = ?config(grainref, Config),
 
-    %% We simulate a previous remote reg
+    %% We simulate a previous remote registration. It could be alive or dead
+    %% but as we are not connected to that node we should consider it dead.
     [_|PidStr] = partisan:self(),
-    PidRef1 = ['foo@127.0.0.1'|PidStr],
+    UnreachableNode = 'foo@127.0.0.1',
+    PidRef1 = [UnreachableNode|PidStr],
     plum_db:put(?PDB_PREFIX, GrainRef, [PidRef1]),
 
     ?assertMatch(
         undefined,
         erleans_pm:whereis_name(GrainRef, [safe]),
-        "Should be unreachable and deemed dead"
+        "Should be unreachable and considered dead"
     ),
 
     {ok, 2} = test_grain:call_counter(GrainRef),
