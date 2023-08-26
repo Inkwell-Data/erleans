@@ -113,7 +113,7 @@ stale_local_entry(Config) ->
 
     %% We simulate a previous local reg
     ok = plum_db:put(?PDB_PREFIX, GrainRef, [partisan:self()]),
-    dbg:tracer(), dbg:p(all,c), dbg:tpl(erleans_pm, '_', x),
+
     ?assertMatch(
         undefined,
         erleans_pm:whereis_name(GrainRef),
