@@ -119,7 +119,8 @@ stale_local_entry(Config) ->
         erleans_pm:whereis_name(GrainRef),
         "Should not return the pid it is a stale entry and thus "
         "it is not present in the local erleans_pm ets table."
-    ).
+    ),
+    ok = plum_db:delete(?PDB_PREFIX, GrainRef).
 
 
 unreachable_remote_entry(Config) ->
@@ -155,7 +156,9 @@ unreachable_remote_entry(Config) ->
         [PidRef1, PidRef2],
         plum_db:get(?PDB_PREFIX,GrainRef),
         "We should have 2 pids"
-    ).
+    ),
+
+    ok = plum_db:delete(?PDB_PREFIX, GrainRef).
 
 
 
