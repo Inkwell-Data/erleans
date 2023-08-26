@@ -59,6 +59,7 @@
 
 -export([register_name/1]).
 -export([unregister_name/1]).
+-export([local_add/2]).
 -dialyzer({nowarn_function, register_name/0}).
 
 -endif.
@@ -77,7 +78,7 @@
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
+%% @doc Starts the `erleans_pm' server.
 %% @end
 %% -----------------------------------------------------------------------------
 start_link() ->
