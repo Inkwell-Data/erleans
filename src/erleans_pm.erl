@@ -119,13 +119,16 @@ register_name() ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec unregister_name() ->
-    ok | no_return().
+    ok | {error, badgrain | not_owner}.
 
 unregister_name() ->
     GrainRef = erleans:grain_ref(),
-    GrainRef =/= undefined orelse error(badgrain),
-
-    partisan_gen_server:call(?MODULE, {unregister_name, GrainRef}).
+    case GrainRef == undefined of
+        true ->
+            {error, badgrain};
+        false ->
+            partisan_gen_server:call(?MODULE, {unregister_name, GrainRef})
+    end.
 
 
 %% -----------------------------------------------------------------------------
@@ -367,22 +370,14 @@ handle_call({unregister_name, GrainRef}, {Caller, _}, State)
 when is_pid(Caller) ->
     Reply = case ets:lookup(?TAB, GrainRef) of
         [] ->
-            erleans_utils:error(
-                badarg, [GrainRef], #{
-                    1 => "is not a registered name"
-                }
-            );
+            ok;
         [{gp, GrainRef, Pid, MRef}] when Pid == Caller ->
             _ = erlang:demonitor(MRef),
             ok = local_remove(GrainRef, Pid),
             ok = global_remove(GrainRef, Pid);
 
         [{gp, GrainRef, Pid, _}] when Pid =/= Caller ->
-            erleans_utils:error(
-                badarg, [GrainRef], #{
-                    1 => "is not a registered name for the calling process"
-                }
-            )
+            {error, not_owner}
     end,
 
     {reply, Reply, State};
