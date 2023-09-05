@@ -29,7 +29,12 @@
                        placement           := placement(),
                        provider            => provider() | undefined}.
 
--type placement() :: random | prefer_local | stateless | {stateless, integer()} | system_grain. %% | load
+-type placement() :: random
+                    | prefer_local
+                    | stateless
+                    | {stateless, integer()}
+                    | {callback, module(), Fun :: atom()}
+                    | system_grain. %% | load
 
 -type etag() :: integer().
 
