@@ -237,7 +237,9 @@ activate_grain(GrainRef=#{placement := Placement}) ->
         prefer_local ->
             activate_local(GrainRef);
         random ->
-            activate_random(GrainRef)
+            activate_random(GrainRef);
+        {callback, Mod, Fun} ->
+            activate_callback(GrainRef, Mod, Fun)
         %% load ->
         %%  load placement
     end.
@@ -262,10 +264,30 @@ activate_local(GrainRef) ->
 %% Activate the grain on a random node in the cluster
 activate_random(GrainRef) ->
     {ok, Members} = partisan_peer_service:members(),
-    Size = erlang:length(Members),
-    Nth = rand:uniform(Size),
-    Node = lists:nth(Nth, Members),
-    erleans_grain_sup:start_child(Node, GrainRef).
+    activate_at(erleans_utils:shuffle(Members), GrainRef).
+
+%% Activate the grain on a node determined by calling Mode:Fun
+activate_callback(GrainRef, Mod, Fun) ->
+    Node = erleans_utils:fun_or_default(Mod, Fun, 1, [GrainRef], undefined),
+    activate_at([Node], GrainRef).
+
+
+%% @private
+activate_at([], GrainRef) ->
+    activate_local(GrainRef);
+
+activate_at([undefined|T], GrainRef) ->
+    activate_at(T, GrainRef);
+
+activate_at([H|T], GrainRef) ->
+    try erleans_grain_sup:start_child(H, GrainRef) of
+        {ok, _} = OK ->
+            OK
+    catch
+        exit:{{nodedown, H}, _} ->
+            activate_at(T, GrainRef)
+    end.
+
 
 %% not used but required by the behaviour definition
 init(Args) ->

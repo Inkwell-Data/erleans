@@ -23,6 +23,7 @@
 -export([fun_or_default/3]).
 -export([fun_or_default/5]).
 -export([error/3]).
+-export([shuffle/1]).
 
 
 %% If a function is exported by the module return the result of calling it
@@ -55,5 +56,39 @@ error(Reason, Args, Cause) when is_list(Args), is_map(Cause) ->
         Args,
         [{error_info, #{cause => Cause}}]
     ).
+
+
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% From https://erlangcentral.org/wiki/index.php/RandomShuffle
+%% @end
+%% -----------------------------------------------------------------------------
+shuffle([]) ->
+    [];
+
+shuffle(List) ->
+    %% Determine the log n portion then randomize the list.
+    randomize(round(math:log(length(List)) + 0.5), List).
+
+
+
+%% @private
+randomize(1, List) ->
+    randomize(List);
+
+randomize(T, List) ->
+    lists:foldl(
+        fun(_E, Acc) -> randomize(Acc) end,
+        randomize(List),
+        lists:seq(1, (T - 1))).
+
+
+%% @private
+randomize(List) ->
+    D = lists:map(fun(A) -> {rand:uniform(), A} end, List),
+    {_, D1} = lists:unzip(lists:keysort(1, D)),
+    D1.
 
 

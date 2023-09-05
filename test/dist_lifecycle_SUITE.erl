@@ -18,7 +18,7 @@
 -define(NODE_A, 'a@127.0.0.1').
 
 all() ->
-    [manual_start_stop].
+    [manual_start_stop, activate_callback].
 
 init_per_suite(Config) ->
     application:load(plum_db), % will load partisan
@@ -119,4 +119,21 @@ manual_start_stop(_Config) ->
     ?assertEqual({ok, ?NODE_A}, test_grain:node(Grain2)),
 
     ok.
+
+
+activate_callback(_Config) ->
+    meck:new(test_grain, [passthrough]),
+    meck:expect(test_grain, placement,
+        fun() -> {callback, ?MODULE, activate_callback_placement} end
+    ),
+    Grain3 = erleans:get_grain(test_grain, <<"grain3">>),
+    Expected = activate_callback_placement(Grain3),
+    ?assertEqual({ok, Expected}, test_grain:node(Grain3)).
+
+
+%% used by activate_callback
+activate_callback_placement(_GrainRef) ->
+    ?NODE_A.
+
+
 
