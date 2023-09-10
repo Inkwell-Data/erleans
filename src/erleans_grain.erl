@@ -165,10 +165,27 @@ grain_ref(Process) ->
 %% certain timers to trigger.
 %% @end
 %% -----------------------------------------------------------------------------
--spec deactivate(erleans:grain_ref()) -> ok | {error, any()}.
+-spec deactivate(erleans:grain_ref() | partisan:any_pid()) ->
+    ok | {error, any()}.
 
-deactivate(GrainRef) ->
-    maybe_call(GrainRef, deactivate).
+deactivate(#{id := _} = GrainRef) ->
+    case erleans_pm:whereis_name(GrainRef) of
+        undefined ->
+            {error, not_active};
+        PidRef ->
+            deactivate(PidRef)
+    end;
+
+deactivate(PidRef) ->
+    try
+        Event = {?current_span_ctx, req_type(), deactivate},
+        partisan_gen_statem:cast(PidRef, Event)
+    catch
+        exit:{noproc, notfound} ->
+            {error, not_found};
+        exit:Reason ->
+            {error, Reason}
+    end.
 
 
 %% -----------------------------------------------------------------------------
@@ -693,24 +710,6 @@ maybe_crash({error, Reason}) ->
     exit(Reason);
 maybe_crash(_) ->
     ok.
-
-
-%% @private
-maybe_call(GrainRef, deactivate) ->
-    try
-        case erleans_pm:whereis_name(GrainRef) of
-            undefined ->
-                {error, not_active};
-            PidRef ->
-                Event = {?current_span_ctx, req_type(), deactivate},
-                partisan_gen_statem:cast(PidRef, Event)
-        end
-    catch
-        exit:{noproc, notfound} ->
-            {error, not_found};
-        exit:Reason ->
-            {error, Reason}
-    end.
 
 
 %% @private

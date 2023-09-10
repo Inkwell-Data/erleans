@@ -51,8 +51,6 @@
 -export([handle_info/2]).
 -export([terminate/2]).
 
-%% PRIVATE API CALLED INTERNALLY VIA SPAWNING
--export([terminator/2]).
 
 %% TEST API
 -ifdef(TEST).
@@ -129,21 +127,6 @@ unregister_name() ->
         false ->
             partisan_gen_server:call(?MODULE, {unregister_name, GrainRef})
     end.
-
-
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec terminator(
-    GrainRef :: erleans:grain_ref(), Pid :: partisan_remote_ref:p()) -> ok.
-
-terminator(GrainRef, ProcessRef) ->
-    Pid = partisan_remote_ref:to_term(ProcessRef),
-    _ = partisan_gen_supervisor:terminate_child(
-        {erleans_grain_sup, partisan:node()}, Pid
-    ),
-    global_remove(GrainRef, ProcessRef).
 
 
 %% -----------------------------------------------------------------------------
@@ -504,30 +487,13 @@ terminate_duplicates(GrainRef, ProcessRefs0) ->
 
             %% First we update the global registry
             ok = plum_db:put(?PDB_PREFIX, GrainRef, lists:usort(Keep)),
-            ok = terminate_grains(GrainRef, Kill)
+            ok = terminate_grains(Kill)
     end.
 
 
 %% @private
-terminate_grains(GrainRef, ProcessRefs) ->
-    %% _ = [
-    %%     begin
-    %%         _ = partisan_gen_supervisor:terminate_child(
-    %%             {erleans_grain_sup, partisan:node()}, ProcessRef
-    %%         )
-    %%     end || ProcessRef <- ProcessRefs
-    %% ],
-
-    %% spawn a terminator on the same node where the grain activation is
-    _ = [
-        begin
-            %% TODO check if we can use a
-            %% partisan_gen_server:cast({?MODULE, Node})
-            Node = partisan:node(ProcessRef),
-            partisan:spawn(Node, ?MODULE, terminator, [GrainRef, ProcessRef])
-        end || ProcessRef <- ProcessRefs
-    ],
-
+terminate_grains(ProcessRefs) ->
+    _ = [erleans_grain:deactivate(ProcessRef) || ProcessRef <- ProcessRefs],
     ok.
 
 
