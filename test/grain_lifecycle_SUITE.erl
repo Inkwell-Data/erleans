@@ -21,8 +21,13 @@ all() ->
      {group, deactivate_after_50000}].
 
 groups() ->
-    [{deactivate_after_2, [], [manual_start_stop, ephemeral_state,
-                               no_provider_grain, exit_notfound]},
+    [{deactivate_after_2, [], [
+        manual_start_stop,
+        ephemeral_state,
+        no_provider_grain,
+        exit_notfound,
+        deactivate_request
+    ]},
      {deactivate_after_60, [], [bad_etag_save]},
      {deactivate_after_30, [], [request_types]},
      {deactivate_after_50000, [], [local_activations]}].
@@ -242,3 +247,20 @@ local_activations(_Config) ->
                     error(loop_timeout)
             end
      end)(0).
+
+
+deactivate_request(_Config) ->
+    GrainRef = erleans:get_grain(test_grain, <<"deactivate_request_grain">>),
+    {ok, 0} = test_grain:call_counter(GrainRef),
+    %% Grain should have beend activated and registered
+
+    PidRef = erleans_pm:whereis_name(GrainRef),
+    Node = partisan:node(),
+    ?assertMatch([Node|_PidStr], PidRef),
+
+    ?assertMatch(ok, erleans_grain:deactivate(GrainRef)),
+    timer:sleep(application:get_env(erleans, deactivate_after, 50000 * 2)),
+    ?assertMatch(undefined, erleans_pm:whereis_name(GrainRef)),
+    ?assertMatch({error, _}, erleans_grain:deactivate(GrainRef)).
+
+

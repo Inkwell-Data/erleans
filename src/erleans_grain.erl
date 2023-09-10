@@ -34,6 +34,7 @@
 
 -export([start_link/1,
          grain_ref/1,
+         deactivate/1,
          call/2,
          call/3,
          cast/2]).
@@ -157,7 +158,26 @@ grain_ref(Process) ->
     end.
 
 
--spec call(GrainRef :: erleans:grain_ref(), Request :: term()) -> Reply :: term().
+%% -----------------------------------------------------------------------------
+%% @doc Requests the deactivation (and termination) of the grain associated with
+%% reference `Grain Ref'.
+%% The request might not have immediate effect, as the grain needs to wait for
+%% certain timers to trigger.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec deactivate(erleans:grain_ref()) -> ok | {error, any()}.
+
+deactivate(GrainRef) ->
+    maybe_call(GrainRef, deactivate).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec call(GrainRef :: erleans:grain_ref(), Request :: term()) ->
+    Reply :: term().
+
 call(GrainRef, Request) ->
     call(GrainRef, Request, ?DEFAULT_TIMEOUT).
 
@@ -399,6 +419,9 @@ callback_mode() ->
 active(enter, _OldState, Data=#data{deactivate_after=DeactivateAfter}) ->
     {keep_state, Data, [{state_timeout, DeactivateAfter, activation_expiry}]};
 
+active({call, _} = EventType, {_, _, deactivate} = Event, #data{} = Data) ->
+    handle_event(EventType, Event, active, Data);
+
 active({call, From}, {_, ReqType, grain_ref}, #data{} = Data) ->
     CbData = Data#data.cb_state,
     maybe_crash(CbData),
@@ -466,6 +489,15 @@ timer_check(Data) ->
             {keep_state, Data, [{state_timeout, 50, check_timers}]}
     end.
 
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+handle_event({call, From}, {_, _ReqType, deactivate}, deactivating, _Data) ->
+    {keep_state_and_data, [{reply, From, ok}]};
+handle_event({call, From}, {_, _ReqType, deactivate}, _, Data) ->
+    %% filter these out
+    {next_state, deactivating, Data, [{reply, From, ok}]};
 handle_event(_, {cancel_timer, _Pid, _TimeLeft}, _, _Data) ->
     %% filter these out
     keep_state_and_data;
@@ -661,6 +693,24 @@ maybe_crash({error, Reason}) ->
     exit(Reason);
 maybe_crash(_) ->
     ok.
+
+
+%% @private
+maybe_call(GrainRef, deactivate) ->
+    try
+        case erleans_pm:whereis_name(GrainRef) of
+            undefined ->
+                {error, not_active};
+            PidRef ->
+                Event = {?current_span_ctx, req_type(), deactivate},
+                partisan_gen_statem:cast(PidRef, Event)
+        end
+    catch
+        exit:{noproc, notfound} ->
+            {error, not_found};
+        exit:Reason ->
+            {error, Reason}
+    end.
 
 
 %% @private
