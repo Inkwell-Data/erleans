@@ -1,24 +1,25 @@
-%%%----------------------------------------------------------------------------
-%%% Copyright Tristan Sloughter 2019. All Rights Reserved.
-%%%
-%%% Licensed under the Apache License, Version 2.0 (the "License");
-%%% you may not use this file except in compliance with the License.
-%%% You may obtain a copy of the License at
-%%%
-%%%     http://www.apache.org/licenses/LICENSE-2.0
-%%%
-%%% Unless required by applicable law or agreed to in writing, software
-%%% distributed under the License is distributed on an "AS IS" BASIS,
-%%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-%%% See the License for the specific language governing permissions and
-%%% limitations under the License.
-%%%----------------------------------------------------------------------------
+%% -----------------------------------------------------------------------------
+%% Copyright Tristan Sloughter 2019. All Rights Reserved.
+%% Copyright Leapsight 2020 - 2023. All Rights Reserved.
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+%% -----------------------------------------------------------------------------
 
-%%% ---------------------------------------------------------------------------
-%%% @doc Erleans Grain process registry.
-%%%
-%%% @end
-%%% ---------------------------------------------------------------------------
+%% -----------------------------------------------------------------------------
+%% @doc This module implements the `erleans_pm' server process, the Erleans
+%% grain process registry.
+%% @end
+%% -----------------------------------------------------------------------------
 -module(erleans_pm).
 -behavior(partisan_gen_server).
 
@@ -31,7 +32,7 @@
 -define(TOMBSTONE, '$deleted').
 
 %% This server may receive a huge amount of messages.
-%% Make sure that they are stored off heap to avoid exessive GCs.
+%% Make sure that they are stored off heap to avoid excessive GCs.
 -define(SPAWN_OPTS, [{spawn_opt, [{message_queue_data, off_heap}]}]).
 
 
@@ -67,8 +68,6 @@
 
 
 
-
-
 %% =============================================================================
 %% API
 %% =============================================================================
@@ -86,7 +85,7 @@ start_link() ->
 %% -----------------------------------------------------------------------------
 %% @doc Registers the calling process with the `id' attribute it
 %% `erleans:grain_ref()'.
-%% This call is serialised through a server process.
+%% This call is serialised the `erleans_pm' server process.
 %%
 %% Returns an error with the following reasons:
 %% <ul>
@@ -112,8 +111,8 @@ register_name() ->
 
 %% -----------------------------------------------------------------------------
 %% @doc Unregisters a grain. This call fails with `badgrain' if the calling
-%% process is not an {@link erleans_grain}.
-%% This call is serialised through a server process.
+%% process is not the original caller to {@link register_name/0}.
+%% This call is serialised through the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec unregister_name() ->
@@ -606,7 +605,6 @@ local_remove(#{id := _} = GrainRef, Pid) when is_pid(Pid) ->
 %% -----------------------------------------------------------------------------
 -spec global_add(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
 
-
 global_add(#{id := _} = GrainRef, Pid) ->
     New = [partisan_remote_ref:from_term(Pid)],
 
@@ -623,6 +621,9 @@ global_add(#{id := _} = GrainRef, Pid) ->
             %% removing all other local references (inconsistencies that occur
             %% if this node failed before and we were not able to cleanup the
             %% distributed registry).
+            %% @TODO If this server crashed, then we need to keep all local
+            %% processes and restored them (monitored) them, unless they are
+            %% dead, in which case we do exclude them
             L = lists:usort(exclude_local(L0) ++ New),
             plum_db:put(?PDB_PREFIX, GrainRef, L)
     end.
@@ -742,6 +743,7 @@ exclude_dead_resolver(A, B) ->
 %% -----------------------------------------------------------------------------
 exclude_unreachable_resolver(A, B) ->
     resolver(A, B, fun exclude_unreachable/1).
+
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -930,7 +932,7 @@ unregister_all('$end_of_table') ->
 
 %% -----------------------------------------------------------------------------
 %% @doc Registers the calling process with the `id' attribute of `GrainRef'.
-%% This call is serialised through a server process.
+%% This call is serialised the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec register_name(GrainRef :: erleans:grain_ref()) ->
@@ -943,11 +945,11 @@ register_name(GrainRef) ->
 
 %% -----------------------------------------------------------------------------
 %% @doc It can only be called by the caller
-%% This call is serialised through a server process.
+%% This call is serialised the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec unregister_name(GrainRef :: erleans:grain_ref()) ->
-    ok | no_return().
+    ok | {error, badgrain | not_owner}.
 
 unregister_name(#{id := _} = GrainRef) ->
     partisan_gen_server:call(?MODULE, {unregister_name, GrainRef}).
