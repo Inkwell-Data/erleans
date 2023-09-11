@@ -219,7 +219,7 @@ grain_ref(Pid) when is_pid(Pid) ->
     case ets:lookup(?TAB, Pid) of
         [] ->
             {error, not_found};
-        [{pg, Pid, GrainRef, _}] ->
+        [{pgm, Pid, GrainRef, _}] ->
             {ok, GrainRef}
     end;
 
@@ -360,12 +360,12 @@ when is_pid(Caller) ->
     Reply = case ets:lookup(?TAB, GrainRef) of
         [] ->
             ok;
-        [{gp, GrainRef, Pid, MRef}] when Pid == Caller ->
+        [{gpm, GrainRef, Pid, MRef}] when Pid == Caller ->
             _ = erlang:demonitor(MRef),
             ok = local_remove(GrainRef, Pid),
             ok = global_remove(GrainRef, Pid);
 
-        [{gp, GrainRef, Pid, _}] when Pid =/= Caller ->
+        [{gpm, GrainRef, Pid, _}] when Pid =/= Caller ->
             {error, not_owner}
     end,
 
@@ -393,7 +393,7 @@ handle_cast(_Request, State) ->
 handle_info({'DOWN', MRef, process, Pid, _}, State) ->
     ?LOG_DEBUG("Process down ~p", [{Pid, MRef}]),
     case ets:lookup(?TAB, Pid) of
-        [{pg, Pid, GrainRef, MRef}] ->
+        [{pgm, Pid, GrainRef, _}] ->
             ok = local_remove(GrainRef, Pid),
             ok = global_remove(GrainRef, Pid);
         _ ->
@@ -564,16 +564,25 @@ local_add(GrainRef, Pid) ->
     %% check to be unique.
     case ets:lookup(?TAB, GrainRef) of
         [] ->
-            Ref = erlang:monitor(process, Pid),
-            Objects = [
-                {pg, Pid, GrainRef, Ref},
-                {gp, GrainRef, Pid, Ref}
-            ],
-            true = ets:insert(?TAB, Objects),
-            ok;
-        [{gp, GrainRef, OtherPid, _}] ->
+            do_local_add(GrainRef, Pid);
+        [{gpm, GrainRef, OtherPid, _}] ->
             {error, {already_in_use, partisan_remote_ref:from_term(OtherPid)}}
     end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+do_local_add(GrainRef, Pid) ->
+    Ref = erlang:monitor(process, Pid),
+    Objects = [
+        {pgm, Pid, GrainRef, Ref},
+        {gpm, GrainRef, Pid, Ref}
+    ],
+    true = ets:insert(?TAB, Objects),
+    ok.
 
 
 %% -----------------------------------------------------------------------------
@@ -586,7 +595,7 @@ is_monitored(ProcessRef) ->
     Pid = partisan_remote_ref:to_term(ProcessRef),
 
     case ets:lookup(?TAB, Pid) of
-        [{pg, Pid, _, _}] -> true;
+        [{pgm, Pid, _, _}] -> true;
         [] -> false
     end.
 
@@ -923,7 +932,7 @@ unregister_all() ->
     unregister_all(ets:first(?TAB)).
 
 unregister_all(Pid) when is_pid(Pid) ->
-    %% {pg, Pid, GrainRef, MRef}
+    %% {pgm, Pid, GrainRef, MRef}
     GrainRef = ets:lookup_element(?TAB, Pid, 3),
     ok = global_remove(GrainRef, Pid),
     ok = local_remove(GrainRef, Pid),
