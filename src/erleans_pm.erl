@@ -182,19 +182,26 @@ whereis_name(GrainRef, [_|T] = L) when T =/= [] ->
     end;
 
 whereis_name(#{id := _} = GrainRef, [Flag]) ->
-    Opts = [
-        {resolver, fun resolver/2},
-        {allow_put, false}
-    ],
-    case global_lookup(GrainRef, Opts) of
-        ProcessRefs when is_list(ProcessRefs), Flag == safe ->
-            safe_pick(ProcessRefs, GrainRef);
 
-        [ProcessRef|_]  when Flag == unsafe ->
+    case local_lookup(GrainRef) of
+        {ok, ProcessRef} ->
             ProcessRef;
 
-        undefined ->
-            undefined
+        {error, not_found} ->
+            Opts = [
+                {resolver, fun default_resolver/2},
+                {allow_put, false}
+            ],
+            case global_lookup(GrainRef, Opts) of
+                ProcessRefs when is_list(ProcessRefs), Flag == safe ->
+                    safe_pick(ProcessRefs, GrainRef);
+
+                [ProcessRef|_]  when Flag == unsafe ->
+                    ProcessRef;
+
+                undefined ->
+                    undefined
+            end
     end.
 
 
@@ -584,6 +591,19 @@ is_monitored(ProcessRef) ->
     end.
 
 
+-spec local_lookup(GrainRef :: erleans:grain_ref()) ->
+    [partisan_remote_ref:p()] | undefined.
+
+local_lookup(GrainRef) ->
+    case ets:lookup(?TAB, GrainRef) of
+        [] ->
+            {error, not_found};
+
+        [{gpm, GrainRef, Pid, _}] ->
+            {ok, partisan_remote_ref:from_term(Pid)}
+    end.
+
+
 %% -----------------------------------------------------------------------------
 %% @private
 %% @doc
@@ -704,15 +724,6 @@ do_global_remove(GrainRef, L0, ProcessRef) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-resolver(A, B) ->
-    resolver(A, B, fun(X) -> X end).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 resolver(?TOMBSTONE, ?TOMBSTONE, _) ->
     ?TOMBSTONE;
 
@@ -725,6 +736,16 @@ resolver(L, ?TOMBSTONE, Fun) when is_list(L), is_function(Fun, 1) ->
 resolver(L1, L2, Fun) when is_list(L1), is_list(L2), is_function(Fun, 1) ->
     %% Lists are sorted already as we sort them every time we do a put
     maybe_tombstone(Fun(lists:umerge(L1, L2))).
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+default_resolver(A, B) ->
+    resolver(A, B, fun(X) -> X end).
+
 
 
 %% -----------------------------------------------------------------------------
