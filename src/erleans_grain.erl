@@ -132,7 +132,7 @@
 
 -spec start_link(GrainRef :: erleans:grain_ref()) -> {ok, pid() | undefined} | {error, any()}.
 start_link(GrainRef) ->
-    proc_lib:start_link(?MODULE, init, [self(), GrainRef]).
+    partisan_proc_lib:start_link(?MODULE, init, [self(), GrainRef]).
 
 
 %% -----------------------------------------------------------------------------
@@ -180,9 +180,11 @@ deactivate(PidRef) ->
     try
         Event = {?current_span_ctx, req_type(), deactivate},
         partisan_gen_statem:cast(PidRef, Event)
+
     catch
         exit:{noproc, notfound} ->
             {error, not_found};
+
         exit:Reason ->
             {error, Reason}
     end.
@@ -436,9 +438,6 @@ callback_mode() ->
 active(enter, _OldState, Data=#data{deactivate_after=DeactivateAfter}) ->
     {keep_state, Data, [{state_timeout, DeactivateAfter, activation_expiry}]};
 
-active({call, _} = EventType, {_, _, deactivate} = Event, #data{} = Data) ->
-    handle_event(EventType, Event, active, Data);
-
 active({call, From}, {_, ReqType, grain_ref}, #data{} = Data) ->
     CbData = Data#data.cb_state,
     maybe_crash(CbData),
@@ -462,6 +461,10 @@ active({call, From}, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
     after
         ?end_span()
     end;
+
+active(cast, {_, _, deactivate} = Event, #data{} = Data) ->
+    handle_event(cast, Event, active, Data);
+
 active(cast, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
                                                    cb_state=CbData,
                                                    deactivate_after=DeactivateAfter}) ->
@@ -510,6 +513,11 @@ timer_check(Data) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
+handle_event(cast, {_, _ReqType, deactivate}, deactivating, _Data) ->
+    {keep_state_and_data, []};
+handle_event(cast, {_, _ReqType, deactivate}, _, Data) ->
+    %% filter these out
+    {next_state, deactivating, Data, []};
 handle_event({call, From}, {_, _ReqType, deactivate}, deactivating, _Data) ->
     {keep_state_and_data, [{reply, From, ok}]};
 handle_event({call, From}, {_, _ReqType, deactivate}, _, Data) ->
