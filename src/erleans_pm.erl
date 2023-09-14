@@ -254,7 +254,7 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
         [] ->
             undefined;
 
-        ProcessRefs when is_list(ProcessRefs), Flag == safe ->
+        ProcessRefs when Flag == safe ->
             safe_pick(ProcessRefs, GrainRef);
 
         [ProcessRef|_]  when Flag == unsafe ->
@@ -530,7 +530,7 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(Request :: term(), State :: term()) ->
     {noreply, NewState :: term()}.
 
-handle_cast({unregister_name, GrainRef, Pref}, State) ->
+handle_cast({force_unregister_name, GrainRef, Pref}, State) ->
     %% Internal case to deal with inconsistencies
     case ets:lookup(?VIEW_TAB, grain_key(GrainRef)) of
         [#reg{type = local, pid = X}] when X =/= Pref ->
@@ -747,14 +747,27 @@ demonitor(Pid) ->
 
 %% -----------------------------------------------------------------------------
 %% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+lookup(Term) ->
+    [P || #reg{pid = P} <- lookup_registrations(Term)].
+
+
+%% -----------------------------------------------------------------------------
+%% @private
 %% @doc Lookups all the registered grains under name `GrainRef' using the
 %% local ets-based materialised view.
 %% @end
 %% -----------------------------------------------------------------------------
--spec lookup(GrainRef :: erleans:grain_ref()) -> [partisan_remote_ref:p()].
+-spec lookup_registrations(GrainRef :: erleans:grain_ref() | grain_key()) ->
+    [partisan_remote_ref:p()].
 
-lookup(GrainRef) ->
-    Sorted = lists:sort(
+lookup_registrations(#{id := _} = GrainRef) ->
+    lookup_registrations(grain_key(GrainRef));
+
+lookup_registrations({_, _} = GrainKey) ->
+    lists:sort(
         fun
             (#reg{type = local}, #reg{type = _}) ->
                 true;
@@ -765,9 +778,8 @@ lookup(GrainRef) ->
             (#reg{type = A}, #reg{type = B}) ->
                 A =< B
         end,
-        ets:lookup(?VIEW_TAB, grain_key(GrainRef))
-    ),
-    [P || #reg{pid = P} <- Sorted].
+        ets:lookup(?VIEW_TAB, GrainKey)
+    ).
 
 
 %% -----------------------------------------------------------------------------
@@ -839,11 +851,74 @@ sync_local_view(Peer, GrainKey, ?TOMBSTONE) ->
     true = ets:match_delete(?VIEW_TAB, Pattern),
     ok;
 
-sync_local_view(Peer, GrainKey, ProcessRef) ->
+sync_local_view(Peer, GrainKey, RemotePRef) ->
     %% A peer created or updated a registration, we update our view
-    Obj = new_reg(GrainKey, ProcessRef, Peer),
-    true = ets:insert(?VIEW_TAB, Obj),
-    ok.
+    true = ets:insert(?VIEW_TAB, new_reg(GrainKey, RemotePRef, Peer)),
+
+    %% But we need to remove any locl duplicates, as local registration are
+    %% preferred by lookup/1 and thus whereis_name/1
+    case lookup_registrations(GrainKey) of
+        [] ->
+            ok;
+
+        [#reg{key = {Id, ImplMod} = type = local, pid = LocalPRef} | _] ->
+            GrainRef = erleans:get_grain(ImplMod, Id),
+            case erleans_grain:is_location_right(GrainRef, LocalPRef) of
+                true ->
+                    %% Keep local and request deactivation of remote one.
+                    ok = deactivate_grain(GrainRef, RemotePRef);
+
+                false ->
+                    %% Keep remote and request deactivation of local
+                    ok = deactivate_grain(GrainRef, LocalPRef);
+
+                noproc ->
+                    %% Just died while we are blocking this server
+                    %% no need to request deactivation as it will be done
+                    %% after we return
+                    ok
+            end;
+        L ->
+            %% More remote duplicates, this should converge by every peer
+            %% applying this algorithm on every new registration.
+            ok
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+deactivate_grain(GrainRef, ProcessRef) ->
+    case erleans_grain:deactivate(ProcessRef) of
+        ok ->
+            ?LOG_NOTICE(#{
+                description => "Requested duplicate deactivation",
+                grain => GrainRef,
+                pid => ProcessRef
+            });
+
+        {error, Reason} when Reason == not_found; Reason == not_active ->
+            ?LOG_ERROR(#{
+                description => "Failed to deactivate duplicate",
+                grain => GrainRef,
+                pid => ProcessRef,
+                reason => Reason
+            }),
+            %% This is an inconsistency, we need to cleanup.
+            %% We ask the peer to do it, via a private cast (peer can be us)
+            remote_unregister_name(GrainRef, ProcessRef);
+
+        {error, Reason} ->
+            ?LOG_ERROR(#{
+                description => "Failed to deactivate duplicate",
+                grain => GrainRef,
+                pid => ProcessRef,
+                reason => Reason
+            }),
+            ok
+    end.
 
 
 %% -----------------------------------------------------------------------------
@@ -935,105 +1010,34 @@ exclude_unreachable(undefined) ->
     [];
 
 exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
-    lists:filter(
-        fun(ProcessRef) ->
-            try
-                is_proc_alive(ProcessRef)
-            catch
-                _:_ ->
-                    false
-            end
-        end,
-        ProcessRefs
+    lists:filter(fun is_reachable/1, ProcessRefs).
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+is_reachable(ProcessRef) ->
+    try
+        is_proc_alive(ProcessRef)
+    catch
+        _:_ ->
+            false
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+remote_unregister_name(GrainRef, ProcessRef) ->
+    ServerRef = {?MODULE, partisan:node(ProcessRef)},
+    partisan_gen_server:cast(
+        ServerRef, {force_unregister_name, GrainRef, ProcessRef}
     ).
 
-
-
-%% @private
-terminate_duplicates(GrainRef, ProcessRefs0) ->
-    %% We first remove all process known to be dead (non-reachable processes
-    %% are assumed to be alive).
-    %% We still need to call this function, because resolve/2 will only be
-    %% invoked when there is a conflict
-    ProcessRefs1 = exclude_dead(ProcessRefs0),
-
-    Fun = fun
-        (ProcessRef, {1, false, Kill, Keep}) ->
-            %% We keep the last one as none of the previous ones are optimal
-            {0, true, Kill, [ProcessRef|Keep]};
-
-        (ProcessRef, {Rem, false, Kill, Keep}) ->
-            %% Check if grain activation is optimal.
-            %% This won't cause a loop or an activation
-            %% because is_location_right/2 is not an erleans_grain:call/2,3
-            try erleans_grain:is_location_right(GrainRef, ProcessRef) of
-                true ->
-                    %% this process will be selected
-                    {Rem - 1, true, Kill, [ProcessRef|Keep]};
-                false ->
-                    %% mark to terminate as we still have at least
-                    %% one more in the list to check
-                    {Rem - 1, false, [ProcessRef|Kill], [ProcessRef|Keep]};
-                noproc ->
-                    %% grain activation deactivated, or
-                    %% some other process terminated it
-                    {Rem - 1, false, Kill, Keep}
-            catch
-                _:_ ->
-                    {Rem - 1, false, Kill, Keep}
-            end;
-
-        (ProcessRef, {Rem, true, Kill, Keep}) ->
-            %% we already have the one to keep, so we terminate the rest
-            %% Notice: the target node will update this same record on plum_db,
-            %% removing ProcessRef from the list
-            {Rem - 1, true, [ProcessRef|Kill], [ProcessRef|Keep]}
-    end,
-
-    Acc0 = {length(ProcessRefs1), false, [], []},
-
-    {0, _, Kill, _} =  lists:foldl(Fun, Acc0, ProcessRefs1),
-    ok = deactivate_grains(Kill, GrainRef).
-
-
-%% @private
--spec deactivate_grains(
-    [partisan_remote_ref:p()], GrainRef :: erleans:grain_ref()) -> ok.
-
-deactivate_grains([H|T], GrainRef) ->
-    case erleans_grain:deactivate(H) of
-        ok ->
-            ?LOG_NOTICE(#{
-                description => "Deactivated duplicate",
-                grain => GrainRef,
-                pid => H
-            });
-
-        {error, Reason} when Reason == not_found; Reason == not_active ->
-            ?LOG_ERROR(#{
-                description => "Failed to deactivate duplicate.",
-                grain => GrainRef,
-                pid => H,
-                reason => Reason
-            }),
-            %% This is an inconsistency, we need to cleanup.
-            %% We ask the peer to do it, via a private cast (peer can be us)
-            Peer = {?MODULE, partisan:node(H)},
-            partisan_gen_server:cast(Peer, {unregister_name, GrainRef, H});
-
-        {error, Reason} ->
-            ?LOG_ERROR(#{
-                description => "Failed to deactivate duplicate",
-                grain => GrainRef,
-                pid => H,
-                reason => Reason
-            })
-
-    end,
-    deactivate_grains(T, GrainRef);
-
-deactivate_grains([], _) ->
-    ok.
 
 
 %% -----------------------------------------------------------------------------
@@ -1047,12 +1051,9 @@ deactivate_grains([], _) ->
 %% connected to the node, it assumes the process is alive.
 %% @end
 %% -----------------------------------------------------------------------------
-exclude_dead(undefined) ->
-    [];
-
-exclude_dead(ProcessRefs) when is_list(ProcessRefs) ->
+exclude_dead(Registrations) when is_list(Registrations) ->
     lists:filter(
-        fun(ProcessRef) ->
+        fun(#reg{pid = ProcessRef}) ->
             try
                 is_proc_alive(ProcessRef)
             catch
@@ -1069,7 +1070,7 @@ exclude_dead(ProcessRefs) when is_list(ProcessRefs) ->
                     false
             end
         end,
-        ProcessRefs
+        Registrations
     ).
 
 
