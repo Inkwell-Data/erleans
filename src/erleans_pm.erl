@@ -1039,41 +1039,6 @@ remote_unregister_name(GrainRef, ProcessRef) ->
     ).
 
 
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc Returns a new list where all the process references that are certain to
-%% be dead have been removed.
-%% A process is certain to be dead when {@link partisan:is_process_alive}
-%% returns `false', or when is local and we do not have a local entry for this
-%% process (the case for a previous instance of the same pid).
-%% If the call to {@link partisan:is_process_alive} fails e.g. when we are not
-%% connected to the node, it assumes the process is alive.
-%% @end
-%% -----------------------------------------------------------------------------
-exclude_dead(Registrations) when is_list(Registrations) ->
-    lists:filter(
-        fun(#reg{pid = ProcessRef}) ->
-            try
-                is_proc_alive(ProcessRef)
-            catch
-                error:not_yet_connected ->
-                    %% It might be alive, but we're not connected to the node
-                    true;
-
-                error:disconnected ->
-                    %% It might be alive, but we're not connected to the node
-                    true;
-
-                _:_ ->
-                    %% Unknwown
-                    false
-            end
-        end,
-        Registrations
-    ).
-
-
 %% -----------------------------------------------------------------------------
 %% @doc Unregisters all local alive processes.
 %% @end
