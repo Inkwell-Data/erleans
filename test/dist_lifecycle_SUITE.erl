@@ -30,6 +30,7 @@ init_per_suite(Config) ->
     application:set_env(partisan, periodic_enabled, true),
     application:set_env(partisan, periodic_interval, 100),
     logger:set_application_level(partisan, error),
+    logger:set_application_level(erleans, debug),
     {ok, _} = application:ensure_all_started(plum_db), % will start partisan
     {ok, _} = application:ensure_all_started(erleans),
     start_nodes(),

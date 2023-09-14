@@ -18,6 +18,51 @@
 %% -----------------------------------------------------------------------------
 %% @doc This module implements the `erleans_pm' server process, the Erleans
 %% grain process registry.
+%%
+%% The server state consists of the following elements:
+%% <ul>
+%% <li>
+%% A set of local monitor references with form
+%% `{pid(), erleans:grain_ref(), reference()}' for every local registration.
+%% This is stored in a protected @{link ets} `set' table managed by the
+%% {@link erleans_table_owner} process to ensure the table survives this
+%% server's crashes.
+%% </li>
+%% <li>
+%% A distributed and globally-replicated set of mappings from
+%% {@link grain_key()} to a single {@link partisan_remote_ref:p()}.
+%% This is stored on {@link plum_db}.
+%% </li>
+%% <li>
+%% A materialised view containing all the registrations (local and
+%% remote) for a {@link erleans:grain_ref()}.
+%% This is stored in a protected @{link ets} `bag' table.
+%% This table is used to resolve lookups and is constructued based on the
+%% insertions and deletions that happen on the previous two collections.
+%% </li>
+%% </ul>
+%%
+%% == Controls ==
+%% <ul>
+%% <li>
+%% A grain registers itself and can only do it using its
+%% {@link erleans:grain_ref()} as name. This is ensured by this server by
+%% calling {@link erleans_grain:grain_ref()} on the process calling the
+%% function {register_name/0}. There is no provision in the API for a process to
+%% register another process.
+%% </li>
+%% <li>
+%% A grain unregisters itself. There is no provision in the API for a process to
+%% unregister another process.
+%% </li>
+%% </ul>
+%%
+%% == Events ==
+%% <ul>
+%% <li>
+%% A local registered grain `DOWN` signal is received.
+%% </li>
+%% </ul>
 %% @end
 %% -----------------------------------------------------------------------------
 -module(erleans_pm).
@@ -27,13 +72,33 @@
 -include_lib("partisan/include/partisan.hrl").
 -include("erleans.hrl").
 
--define(PDB_PREFIX, {?MODULE, grain_ref}).
--define(TAB, ?MODULE).
+-define(PDB_PREFIX, {?MODULE, registry}).
 -define(TOMBSTONE, '$deleted').
+
+-define(MONITOR_TAB, erleans_pm_monitor).
+-define(VIEW_TAB, erleans_pm_view).
+
+%% Record stored on ?VIEW_TAB
+-record(reg, {
+    key     ::  grain_key(),
+    pid     ::  partisan_remote_ref:p(),
+    type    ::  local | node() | '_'
+}).
+
 
 %% This server may receive a huge amount of messages.
 %% Make sure that they are stored off heap to avoid excessive GCs.
--define(SPAWN_OPTS, [{spawn_opt, [{message_queue_data, off_heap}]}]).
+-define(OPTS, [
+    {channel, application:get_env(erleans, partisan_channel, undefined)},
+    {spawn_opt, [{message_queue_data, off_heap}]}
+]).
+
+-record(state, {
+    partisan_channel :: partisan:channel()
+}).
+
+
+-type grain_key() :: {GrainId :: any(), ImplMod :: module()}.
 
 
 %% API
@@ -43,6 +108,7 @@
 -export([whereis_name/1]).
 -export([whereis_name/2]).
 -export([grain_ref/1]).
+-export([to_list/0]).
 
 %% PARTISAN_GEN_SERVER CALLBACKS
 -export([init/1]).
@@ -55,17 +121,17 @@
 
 %% TEST API
 -ifdef(TEST).
-
--export([register_name/1]).
--export([unregister_name/1]).
--export([local_add/2]).
--dialyzer({nowarn_function, register_name/0}).
-
+-export([register_name/2]).
+-export([unregister_name/2]).
+-dialyzer({nowarn_function, register_name/2}).
 -endif.
 
-
 -dialyzer({nowarn_function, register_name/0}).
 
+-compile({no_auto_import, [monitor/2]}).
+-compile({no_auto_import, [monitor/3]}).
+-compile({no_auto_import, [demonitor/1]}).
+-compile({no_auto_import, [demonitor/2]}).
 
 
 %% =============================================================================
@@ -79,19 +145,19 @@
 %% @end
 %% -----------------------------------------------------------------------------
 start_link() ->
-    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, [], ?SPAWN_OPTS).
+    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, [], ?OPTS).
 
 
 %% -----------------------------------------------------------------------------
-%% @doc Registers the calling process with the `id' attribute it
+%% @doc Registers the calling process with the `grain_key()' derived from its
 %% `erleans:grain_ref()'.
-%% This call is serialised the `erleans_pm' server process.
+%% This call is serialised via the `erleans_pm' server process.
 %%
 %% Returns an error with the following reasons:
 %% <ul>
 %% <li>`{already_in_use, partisan_remote_ref:p()}' if there is already a process
-%% registered for the same `erleans:grain_ref()'.</li>
-%% %% <li>`badgrain' if the calling process is not an {@link erleans_grain}</li>
+%% registered for the same `grain_key()'.</li>
+%% <li>`badgrain' if the calling process is not an {@link erleans_grain}</li>
 %% </ul>
 %% @end
 %% -----------------------------------------------------------------------------
@@ -120,6 +186,7 @@ register_name() ->
 
 unregister_name() ->
     GrainRef = erleans:grain_ref(),
+
     case GrainRef == undefined of
         true ->
             {error, badgrain};
@@ -158,6 +225,7 @@ whereis_name(GrainRef) ->
 %% remote call. If there is no connection to the node in which the
 %% process lives, it is deemed dead.
 %%
+%%
 %% If Opts is `[]` or `[unsafe]` it will not check for liveness.
 %% @end
 %% -----------------------------------------------------------------------------
@@ -182,26 +250,15 @@ whereis_name(GrainRef, [_|T] = L) when T =/= [] ->
     end;
 
 whereis_name(#{id := _} = GrainRef, [Flag]) ->
+    case lookup(GrainRef) of
+        [] ->
+            undefined;
 
-    case local_lookup(GrainRef) of
-        {ok, ProcessRef} ->
-            ProcessRef;
+        ProcessRefs when is_list(ProcessRefs), Flag == safe ->
+            safe_pick(ProcessRefs, GrainRef);
 
-        {error, not_found} ->
-            Opts = [
-                {resolver, fun default_resolver/2},
-                {allow_put, false}
-            ],
-            case global_lookup(GrainRef, Opts) of
-                ProcessRefs when is_list(ProcessRefs), Flag == safe ->
-                    safe_pick(ProcessRefs, GrainRef);
-
-                [ProcessRef|_]  when Flag == unsafe ->
-                    ProcessRef;
-
-                undefined ->
-                    undefined
-            end
+        [ProcessRef|_]  when Flag == unsafe ->
+            ProcessRef
     end.
 
 
@@ -215,21 +272,25 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
     {ok, erleans:grain_ref()}
     | {error, timeout | any()}.
 
-grain_ref(Pid) when is_pid(Pid) ->
-    case ets:lookup(?TAB, Pid) of
+grain_ref(Process) when is_pid(Process) ->
+    case ets:lookup(?MONITOR_TAB, Process) of
         [] ->
             {error, not_found};
-        [{pgm, Pid, GrainRef, _}] ->
+
+        [{Process, GrainRef, _}] ->
             {ok, GrainRef}
     end;
 
 grain_ref(Process) ->
+    %% Fail if this si not a partisan pid reference
     partisan:is_pid(Process) orelse error({badarg, [Process]}),
+
     Node = partisan:node(Process),
 
     case Node == partisan:node() of
         true ->
             grain_ref(partisan_remote_ref:to_term(Process));
+
         false ->
             case partisan_rpc:call(Node, ?MODULE, grain_ref, [Process], 5000) of
                 {badrpc, Reason} ->
@@ -238,6 +299,16 @@ grain_ref(Process) ->
                     Result
             end
     end.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec to_list() -> [{grain_key(), partisan_remote_ref:p()}].
+
+to_list() ->
+    ets:match(?VIEW_TAB, #reg{key = '$1', pid = '$2', type = '_'}).
 
 
 
@@ -251,66 +322,118 @@ grain_ref(Process) ->
 
 init(_) ->
     %% Trap exists otherwise terminate/1 won't be called when shutdown by
-    %% supervisor
+    %% supervisor.
     erlang:process_flag(trap_exit, true),
 
-    case ets:info(?TAB, name) of
-        undefined ->
-            Opts = [
-                set,
-                protected,
-                named_table,
-                {keypos, 2},
-                {write_concurrency, true},
-                {read_concurrency, true},
-                {decentralized_counters, true}
-            ],
-            ets:new(?TAB, Opts);
-        _ ->
-            ok
-    end,
+    %% Create or claim ets table.
+    %% If this server crashes, data will be preserved.
+    {ok, ?MONITOR_TAB} = erleans_table_owner:add_or_claim(
+        ?MONITOR_TAB,
+        [
+            set,
+            protected,
+            named_table,
+            {keypos, 1},
+            {write_concurrency, true},
+            {read_concurrency, true},
+            {decentralized_counters, true}
+        ]
+    ),
+
+    %% Materialised view derived from the global store (plum_db table)
+    %% In this table we store at most one #reg{type = local} and/or one or more
+    %% #reg{type = node()} for a Key where Key grain_key()
+    ?VIEW_TAB = ets:new(
+        ?VIEW_TAB,
+        [
+            bag,
+            protected,
+            named_table,
+            {keypos, 2},
+            {write_concurrency, true},
+            {read_concurrency, true},
+            {decentralized_counters, true}
+        ]
+    ),
+
+    %% Subscribe to plum_db object_update events
     MS = [{
-        %% {{FullPrefix, Key}, NewObj, ExistingObj}
+        %% {
+        %%    {{?MODULE, registry}, {node(), grain_key()} = Key},
+        %%    NewObj,
+        %%    ExistingObj
+        %% }
         {{?PDB_PREFIX, '_'}, '_', '_'},
         [],
         [true]
     }],
     ok = plum_db_events:subscribe(object_update, MS),
-    State = #{},
-    {ok, State, {continue, global_cleanup}}.
+
+    %% We monitor all nodes so that we can cleanup our view of the registry
+    partisan:monitor_nodes(true),
+
+    {channel, Channel} = lists:keyfind(channel, 1, partisan_gen:get_opts()),
+
+    State = #state{
+        partisan_channel = Channel
+    },
+
+    {ok, State, {continue, monitor_existing}}.
 
 
-handle_continue(global_cleanup, State) ->
+handle_continue(monitor_existing, State) ->
     %% This prevents any grain to be registered as we are blocking the server
     %% until we finish.
-    %% We remove all local references from the global registry. These would be
-    %% references that we were not able to remove on terminate/2 the last time
-    %% we shutdown/crashed e.g. gossip message loss and/or network split when
-    %% shutdown/crash occured.
-    %%
-    %% TODO for this to work properly we need to manually perform an AAE here
+    %% We fold the claimed ?MONITOR_TAB table to find any existing registrations.
+    %% In case the table is new, it would be empty. Otherwise, we would iterate
+    %% over registrations that were registered by a previous instance of this
+    %% gen_server before it crashed.
+    %% TWe re-monitor alive pids and remove dead ones.
     Fun = fun
-        ({_, []}) ->
-            ok;
+        ({Pid, GrainRef, _OldRef}) ->
+            case erlang:is_process_alive(Pid) of
+                true ->
+                    %% The process is still alive, but the monitor has died with
+                    %% the previous instance of this gen_server, so we monitor
+                    %% again. We use relaxed mode which allows us to update the
+                    %% existing registration on the 3 tables, ?MONITOR_TAB,
+                    %% ?VIEW_TAB and ?PDB_PREFIX.
+                    ok = do_register_name(GrainRef, Pid, relaxed);
+                false ->
+                    %% THe process has died, so we unregister. This will also
+                    %% remove the registration from the global table (plum_db).
+                    ok = do_unregister_name(GrainRef, Pid)
+            end;
 
-        ({GrainRef, ProcessRefs0}) when is_list(ProcessRefs0) ->
-            %% We update the record by removing any local reference.
-            %% We do not need to check with the local registry (ets table) as
-            %% this call occurs before any other process could call
-            %% register_name.
-            ProcessRefs = lists:usort(exclude_local(ProcessRefs0)),
-            plum_db:put(?PDB_PREFIX, GrainRef, ProcessRefs);
-
-        ({error, badresolver}) ->
+        ({_, _, _, _}) ->
             ok
     end,
+    ok = lists:foreach(Fun, ets:tab2list(?MONITOR_TAB)),
 
-    %% We use the exclude_local_resolver/2 to avoid making a remote call to
-    %% check on process liveness for remote process as we only care about
-    %% removing instances of previous local processes
+    %% We should now have all existing local grains re-registered on this
+    %% server and gossip messages sent to cluster peers.
+    {noreply, State, {continue, sync_remote}};
+
+handle_continue(sync_remote, State) ->
+    %% This prevents any grain to be registered as we are blocking the server
+    %% until we finish.
+    Node = partisan:node(),
+
+    Fun = fun
+        ({{Peer, GrainKey}, ProcessRef}) when Peer == Node ->
+            sync_global_registration(GrainKey, ProcessRef);
+
+        ({{Peer, GrainKey}, ProcessRef}) when Peer =/= Node ->
+            sync_local_view(Peer, GrainKey, ProcessRef)
+    end,
+
     Opts = [
         {remove_tombstones, true},
-        {resolver, fun exclude_local_resolver/2},
+        %% We want lww to resolve any conflict. In general they shouldn't exist
+        %% as only the owner of a registration can update it
+        {resolver, lww},
+        %% We do not want to update registrations we do not own, so our fun
+        %% considers this
         {allow_put, false}
     ],
 
@@ -322,59 +445,83 @@ handle_continue(_, State) ->
     {noreply, State}.
 
 
-
 handle_call({register_name, GrainRef}, {Caller, _}, State)
 when is_pid(Caller) ->
-    Reply = case exclude_unreachable(global_lookup(GrainRef)) of
-        [] ->
-            %% We call monitor first as it acts as a memory barrier,
-            %% serialising all local concurrent registrations.
-            case local_add(GrainRef, Caller) of
-                ok ->
-                    global_add(GrainRef, Caller);
+    %% This call can only be made locally, so if Caller is not a pid it would be
+    %% a partisan:pid() and thus we will match the fallback clause returning an
+    %% error.
 
-                {error, {already_in_use, ProcessRef}} = Error ->
-                    case partisan:is_local_pid(ProcessRef, Caller) of
-                        true ->
-                            %% This should not happen, but just in case
-                            ok;
-                        false ->
-                            %% Some other process beat us in calling local_add
-                            Error
-                    end
-            end;
+    %% We get all known registrations order by location local < node(), and then
+    %% by node().
+    Registrations = lookup(GrainRef),
+
+    %% We then exclude unreachable grains
+    Reply = case exclude_unreachable(Registrations) of
+        [] ->
+            %% Nothing registered or unreachable, so we allow the local
+            %% registration
+            do_register_name(GrainRef, Caller);
 
         [ProcessRef|_] ->
+            %% We found at least one active grain that is reachable, so we pick
+            %% it. If there was a local grain registered under GrainRef,
+            %% ProcessRef would be it (becuase of ordering guarantee).
             {error, {already_in_use, ProcessRef}}
     end,
 
     {reply, Reply, State};
 
+handle_call({register_name_test, GrainRef, PRef}, _From, State) ->
+    %% Only for testing (se export of register_name/2)
+    %% Add to local materialised view
+    Node = partisan:node(PRef),
+
+    Reply =
+        case Node == partisan:node() of
+            true ->
+                do_register_name(GrainRef, partisan_remote_ref:to_pid(PRef));
+            false ->
+                %% We simulate a remote registration
+                Obj = new_reg(grain_key(GrainRef), PRef, Node),
+                true = ets:insert(?VIEW_TAB, Obj),
+
+                %% Add to globally replicated table
+                Key = {Node, grain_key(GrainRef)},
+                ok = plum_db:put(?PDB_PREFIX, Key, PRef)
+        end,
+    {reply, Reply, State};
+
+handle_call({unregister_name_test, GrainRef, PRef}, _From, State) ->
+    %% Only for testing (se export of unregister_name/2)
+    Node = partisan:node(PRef),
+
+    Reply =
+        case Node == partisan:node() of
+            true ->
+                do_unregister_name(GrainRef, partisan_remote_ref:to_pid(PRef));
+            false ->
+                %% We simulate a remote registration
+                Obj = new_reg(grain_key(GrainRef), PRef, Node),
+                true = ets:delete_object(?VIEW_TAB, Obj),
+
+                %% Remove to globally replicated table
+                Key = {Node, grain_key(GrainRef)},
+                ok = plum_db:delete(?PDB_PREFIX, Key)
+        end,
+    {reply, Reply, State};
+
 handle_call({register_name, _}, _From, State) ->
-    %% From is a partisan_process_ref
-    Error = {error, not_local},
-    {reply, Error, State};
+    %% A call from a remote node, now allowed
+    {reply, {error, not_local}, State};
 
 handle_call({unregister_name, GrainRef}, {Caller, _}, State)
 when is_pid(Caller) ->
-    Reply = case ets:lookup(?TAB, GrainRef) of
-        [] ->
-            ok;
-        [{gpm, GrainRef, Pid, MRef}] when Pid == Caller ->
-            _ = erlang:demonitor(MRef),
-            ok = local_remove(GrainRef, Pid),
-            ok = global_remove(GrainRef, Pid);
-
-        [{gpm, GrainRef, Pid, _}] when Pid =/= Caller ->
-            {error, not_owner}
-    end,
-
+    Reply = do_unregister_name(GrainRef, Caller),
     {reply, Reply, State};
 
 handle_call({unregister_name, _}, _From, State) ->
-    %% From is a partisan_process_ref, thus not local
-    Error = {error, not_local},
-    {reply, Error, State};
+    %% A call from a remote node, now allowed
+    {reply, {error, not_local}, State};
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -383,6 +530,18 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(Request :: term(), State :: term()) ->
     {noreply, NewState :: term()}.
 
+handle_cast({unregister_name, GrainRef, Pref}, State) ->
+    %% Internal case to deal with inconsistencies
+    case ets:lookup(?VIEW_TAB, grain_key(GrainRef)) of
+        [#reg{type = local, pid = X}] when X =/= Pref ->
+            Pid = partisan_remote_ref:to_pid(Pref),
+            ok = do_unregister_name(GrainRef, Pid);
+
+        _ ->
+            ok
+    end,
+    {noreply, State};
+
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -390,38 +549,42 @@ handle_cast(_Request, State) ->
 -spec handle_info(Message :: term(), State :: term()) ->
     {noreply, NewState :: term()}.
 
-handle_info({'DOWN', MRef, process, Pid, _}, State) ->
-    ?LOG_DEBUG("Process down ~p", [{Pid, MRef}]),
-    case ets:lookup(?TAB, Pid) of
-        [{pgm, Pid, GrainRef, _}] ->
-            ok = local_remove(GrainRef, Pid),
-            ok = global_remove(GrainRef, Pid);
-        _ ->
-            ok
-    end,
-
+handle_info({nodedown, _Node}, State) ->
     {noreply, State};
 
-handle_info(
-    {plum_db_event, object_update, {{{_, _}, GrainRef}, Obj, PrevObj}},
-    State) ->
+handle_info({nodeup, _Node}, State) ->
+    {noreply, State};
+
+handle_info({'DOWN', MRef, process, Pid, _}, State) ->
+    ?LOG_DEBUG("Process down ~p", [{Pid, MRef}]),
+    ok = do_unregister_name(Pid),
+    {noreply, State};
+
+handle_info({plum_db_event, object_update, Payload}, State) ->
+    Node = partisan:node(),
+    {{_Prefix, Key}, Obj, PrevObj} = Payload,
+
     ?LOG_DEBUG(#{
         message => "plum_db_event object_update received",
+        key => Key,
         object => Obj,
         prev_obj => PrevObj
     }),
 
-    Resolved = plum_db_object:resolve(Obj, fun exclude_dead_resolver/2),
+    %% Value can be a partisan_remote_reg:p() or ?TOMBSTONE
+    Value = plum_db_object:value(plum_db_object:resolve(Obj, lww)),
 
-    case plum_db_object:value(Resolved) of
-        ProcessRefs when is_list(ProcessRefs) ->
-            %% we need to remove dead processes first to avoid the case when we
-            %% kill one that returns false in the belief that there's at least
-            %% one remaining but that could actually be dead already
-            ok = terminate_duplicates(GrainRef, ProcessRefs);
-        _ ->
-            ok
+    case Key of
+        {Node, GrainKey} ->
+            %% A peer updated or deleted our registration on the global registry.
+            %% This should not happen, ensure we are in sync.
+            sync_global_registration(GrainKey, Value);
+
+        {Peer, GrainKey} ->
+            sync_local_view(Peer, GrainKey, Value)
     end,
+
+
     {noreply, State};
 
 handle_info(_, State) ->
@@ -440,6 +603,349 @@ terminate(_Reason, _State) ->
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
+
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc Register the calling process with GrainRef unless another local
+%% registration exists.
+%% The call
+%% @end
+%% -----------------------------------------------------------------------------
+-spec do_register_name(GrainRef :: erleans:grain_ref(), Pid :: pid()) ->
+    ok | {error, {already_in_use, partisan_remote_ref:p()}}.
+
+do_register_name(GrainRef, Pid) ->
+    do_register_name(GrainRef, Pid, strict).
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc Register the calling process with GrainRef unless another local
+%% registration exists.
+%% The call
+%% @end
+%% -----------------------------------------------------------------------------
+-spec do_register_name(
+    GrainRef :: erleans:grain_ref(), Pid :: pid(), strict | relaxed) ->
+    ok | {error, {already_in_use, partisan_remote_ref:p()}}.
+
+do_register_name(GrainRef, Pid, Mode) when is_pid(Pid) ->
+    case monitor(GrainRef, Pid, Mode) of
+        ok ->
+            %% Add to local materialised view
+            Obj = new_reg(grain_key(GrainRef), Pid, local),
+            true = ets:insert(?VIEW_TAB, Obj),
+
+            %% Add to global registry (globally replicated table)
+            Node = partisan:node(),
+            Key = {Node, grain_key(GrainRef)},
+            Pref = partisan_remote_ref:from_term(Pid),
+            ok = plum_db:put(?PDB_PREFIX, Key, Pref);
+
+        {error, _} = Error ->
+            Error
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec do_unregister_name(Pid :: pid()) -> true.
+
+do_unregister_name(Pid) when is_pid(Pid) ->
+    case ets:lookup(?MONITOR_TAB, Pid) of
+        [{Pid, GrainRef, _}] ->
+            ok = do_unregister_name(GrainRef, Pid);
+        _ ->
+            ok
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec do_unregister_name(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> true.
+
+do_unregister_name(GrainRef, Pid) when is_pid(Pid) ->
+    GrainKey = grain_key(GrainRef),
+    Key = {partisan:node(), GrainKey},
+
+    ok = demonitor(Pid),
+    true = ets:delete(?MONITOR_TAB, Pid),
+    true = ets:delete_object(?VIEW_TAB, new_reg(GrainKey, Pid, local)),
+    ok = plum_db:delete(?PDB_PREFIX, Key).
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+grain_key(#{id := Id, implementing_module := Mod}) ->
+    {Id, Mod}.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+new_reg(Key, Pid, Type) when is_pid(Pid) ->
+    new_reg(Key, partisan_remote_ref:from_term(Pid), Type);
+
+new_reg({_, _} = Key, PidRef, Type) when Type == local; is_atom(Type) ->
+    #reg{
+        key = Key,
+        pid = PidRef,
+        type = Type
+    }.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+monitor(GrainRef, Pid, strict) when is_pid(Pid) ->
+    Mref = erlang:monitor(process, Pid),
+
+    case ets:insert_new(?MONITOR_TAB, {Pid, GrainRef, Mref}) of
+        true ->
+            ok;
+        false ->
+            true = erlang:demonitor(Mref, [flush]),
+            [{OtherPid, GrainRef, _}] = ets:lookup(?MONITOR_TAB, Pid),
+            {error, {already_in_use, partisan_remote_ref:from_term(OtherPid)}}
+    end;
+
+monitor(GrainRef, Pid, relaxed) when is_pid(Pid) ->
+    Mref = erlang:monitor(process, Pid),
+    true = ets:insert(?MONITOR_TAB, {Pid, GrainRef, Mref}),
+    ok.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+demonitor(Pid) ->
+    case ets:take(?MONITOR_TAB, Pid) of
+        [{Pid, _, Mref}] ->
+            true = erlang:demonitor(Mref, [flush]),
+            ok;
+        [] ->
+            ok
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc Lookups all the registered grains under name `GrainRef' using the
+%% local ets-based materialised view.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec lookup(GrainRef :: erleans:grain_ref()) -> [partisan_remote_ref:p()].
+
+lookup(GrainRef) ->
+    Sorted = lists:sort(
+        fun
+            (#reg{type = local}, #reg{type = _}) ->
+                true;
+
+            (#reg{type = _}, #reg{type = local}) ->
+                false;
+
+            (#reg{type = A}, #reg{type = B}) ->
+                A =< B
+        end,
+        ets:lookup(?VIEW_TAB, grain_key(GrainRef))
+    ),
+    [P || #reg{pid = P} <- Sorted].
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+sync_global_registration(GrainKey, Term) ->
+    PidPattern =
+        case Term of
+            ?TOMBSTONE ->
+                '_';
+            _ ->
+                partisan_remote_ref:to_pid(Term)
+        end,
+
+    Pattern = #reg{
+        key = GrainKey,
+        pid = PidPattern,
+        type = local
+    },
+
+    case ets:match_object(?VIEW_TAB, Pattern) of
+        [] when Term == ?TOMBSTONE ->
+            %% This should not happen as peers are only allowed to delete
+            %% owned registrations. But the global registry is in sync.
+            ok;
+
+        [] ->
+            %% The case for and invalid references in the global registry.
+            %% This could be a registration that we were not able to remove
+            %% on terminate/2 the last time we shutdown/crashed e.g.
+            %% gossip message loss and/or network split when shutdown/
+            %% crash occured.
+            Key = {partisan:node(), GrainKey},
+            ok = plum_db:delete(?PDB_PREFIX, Key);
+
+        [#reg{pid = ProcessRef}] when Term == ?TOMBSTONE ->
+            %% This should not happen as no other node should be deleting
+            %% our registrations.
+            Key = {partisan:node(), GrainKey},
+            ok = plum_db:put(?PDB_PREFIX, Key, ProcessRef);
+
+        [#reg{pid = ProcessRef}] when Term == ProcessRef ->
+            %% This should not happen as no other node should be deleting
+            %% our registrations.
+            %% But the global registry is in sync.
+            ok;
+
+        [#reg{pid = ProcessRef}] when Term =/= ProcessRef ->
+            %% An old entry remained in the global registry, we rectify
+            Key = {partisan:node(), GrainKey},
+            ok = plum_db:put(?PDB_PREFIX, Key, ProcessRef)
+
+    end.
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+sync_local_view(Peer, GrainKey, ?TOMBSTONE) ->
+    %% A Peer removed a registration, we need to update our view
+    Pattern = #reg{
+        key = GrainKey,
+        pid = '_',
+        type = Peer
+    },
+    true = ets:match_delete(?VIEW_TAB, Pattern),
+    ok;
+
+sync_local_view(Peer, GrainKey, ProcessRef) ->
+    %% A peer created or updated a registration, we update our view
+    Obj = new_reg(GrainKey, ProcessRef, Peer),
+    true = ets:insert(?VIEW_TAB, Obj),
+    ok.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+whereis_stateless(GrainRef) ->
+    case gproc_pool:pick_worker(GrainRef) of
+        false ->
+            undefined;
+        Pid ->
+            partisan_remote_ref:from_term(Pid)
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+safe_pick(L) ->
+    safe_pick(L, undefined).
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+safe_pick([], _) ->
+    undefined;
+
+safe_pick([ProcessRef | Rest], GrainRef) ->
+    try is_proc_alive(ProcessRef, GrainRef) of
+        true ->
+            ProcessRef;
+        false ->
+            safe_pick(Rest, GrainRef)
+    catch
+        error:_ ->
+            safe_pick(Rest, GrainRef)
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec is_proc_alive(partisan_remote_ref:p()) -> boolean() | no_return().
+
+is_proc_alive(ProcessRef) ->
+    is_proc_alive(ProcessRef, undefined).
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec is_proc_alive(partisan_remote_ref:p(), erleans:grain_ref() | undefined) ->
+    boolean() | no_return().
+
+is_proc_alive(ProcessRef, undefined) ->
+    partisan:is_process_alive(ProcessRef);
+
+is_proc_alive(ProcessRef, GrainRef) ->
+    case grain_ref(ProcessRef) of
+        {ok, GrainRef} ->
+            true;
+        {ok, _} ->
+            %% TODO send a cast to delete this entry!
+            false;
+        {error, _} ->
+            false
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc Returns a new list where all the process references are know to be
+%% reachable. A process is reachable if the process is local (and alive
+%% according to the existance of a monitor) or is remote and
+%% {@link partisan:is_process_alive/1} returns `true' for that process.
+%% @end
+%% -----------------------------------------------------------------------------
+exclude_unreachable(undefined) ->
+    [];
+
+exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
+    lists:filter(
+        fun(ProcessRef) ->
+            try
+                is_proc_alive(ProcessRef)
+            catch
+                _:_ ->
+                    false
+            end
+        end,
+        ProcessRefs
+    ).
 
 
 
@@ -486,338 +992,48 @@ terminate_duplicates(GrainRef, ProcessRefs0) ->
 
     Acc0 = {length(ProcessRefs1), false, [], []},
 
-    case lists:foldl(Fun, Acc0, ProcessRefs1) of
-        {0, _, [], ProcessRefs0} ->
-            ok;
-        {0, _, Kill, Keep} ->
-
-            %% First we update the global registry
-            ok = plum_db:put(?PDB_PREFIX, GrainRef, lists:usort(Keep)),
-            ok = terminate_grains(Kill)
-    end.
+    {0, _, Kill, _} =  lists:foldl(Fun, Acc0, ProcessRefs1),
+    ok = deactivate_grains(Kill, GrainRef).
 
 
 %% @private
-terminate_grains(ProcessRefs) ->
-    _ = [erleans_grain:deactivate(ProcessRef) || ProcessRef <- ProcessRefs],
+-spec deactivate_grains(
+    [partisan_remote_ref:p()], GrainRef :: erleans:grain_ref()) -> ok.
+
+deactivate_grains([H|T], GrainRef) ->
+    case erleans_grain:deactivate(H) of
+        ok ->
+            ?LOG_NOTICE(#{
+                description => "Deactivated duplicate",
+                grain => GrainRef,
+                pid => H
+            });
+
+        {error, Reason} when Reason == not_found; Reason == not_active ->
+            ?LOG_ERROR(#{
+                description => "Failed to deactivate duplicate.",
+                grain => GrainRef,
+                pid => H,
+                reason => Reason
+            }),
+            %% This is an inconsistency, we need to cleanup.
+            %% We ask the peer to do it, via a private cast (peer can be us)
+            Peer = {?MODULE, partisan:node(H)},
+            partisan_gen_server:cast(Peer, {unregister_name, GrainRef, H});
+
+        {error, Reason} ->
+            ?LOG_ERROR(#{
+                description => "Failed to deactivate duplicate",
+                grain => GrainRef,
+                pid => H,
+                reason => Reason
+            })
+
+    end,
+    deactivate_grains(T, GrainRef);
+
+deactivate_grains([], _) ->
     ok.
-
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-safe_pick(L) ->
-    safe_pick(L, undefined).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-safe_pick([], _) ->
-    undefined;
-
-safe_pick([ProcessRef | Rest], GrainRef) ->
-    try is_proc_alive(ProcessRef, GrainRef) of
-        true ->
-            ProcessRef;
-        false ->
-            safe_pick(Rest, GrainRef)
-    catch
-        error:_ ->
-            safe_pick(Rest, GrainRef)
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-whereis_stateless(GrainRef) ->
-    case gproc_pool:pick_worker(GrainRef) of
-        false ->
-            undefined;
-        Pid ->
-            partisan_remote_ref:from_term(Pid)
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc Register the calling process with GrainRef unless another local
-%% registration exists.
-%% The call
-%% @end
-%% -----------------------------------------------------------------------------
--spec local_add(GrainRef :: erleans:grain_ref(), Pid :: pid()) ->
-    ok | {error, {already_in_use, partisan_remote_ref:p()}}.
-
-local_add(GrainRef, Pid) ->
-    %% We check the uniqueness of the GrainRef -> Pid mapping.
-    %% We do not check the uniquess of the reverse mapping Pid-> GrainRef
-    %% since there is no possibility of it happening once the first one has been
-    %% check to be unique.
-    case ets:lookup(?TAB, GrainRef) of
-        [] ->
-            do_local_add(GrainRef, Pid);
-        [{gpm, GrainRef, OtherPid, _}] ->
-            {error, {already_in_use, partisan_remote_ref:from_term(OtherPid)}}
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-do_local_add(GrainRef, Pid) ->
-    Ref = erlang:monitor(process, Pid),
-    Objects = [
-        {pgm, Pid, GrainRef, Ref},
-        {gpm, GrainRef, Pid, Ref}
-    ],
-    true = ets:insert(?TAB, Objects),
-    ok.
-
-
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec is_monitored(Pid :: pid()) -> boolean().
-
-is_monitored(ProcessRef) ->
-    Pid = partisan_remote_ref:to_term(ProcessRef),
-
-    case ets:lookup(?TAB, Pid) of
-        [{pgm, Pid, _, _}] -> true;
-        [] -> false
-    end.
-
-
--spec local_lookup(GrainRef :: erleans:grain_ref()) ->
-    [partisan_remote_ref:p()] | undefined.
-
-local_lookup(GrainRef) ->
-    case ets:lookup(?TAB, GrainRef) of
-        [] ->
-            {error, not_found};
-
-        [{gpm, GrainRef, Pid, _}] ->
-            {ok, partisan_remote_ref:from_term(Pid)}
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec local_remove(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
-
-local_remove(#{id := _} = GrainRef, Pid) when is_pid(Pid) ->
-    true = ets:delete(?TAB, Pid),
-    true = ets:delete(?TAB, GrainRef),
-    ok.
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc Adds a locally registered reference to the distributed registry.
-%% If the distributed registry contains other local references, it considers
-%% them to be stale and removes them while adding the new one.
-%% @end
-%% -----------------------------------------------------------------------------
--spec global_add(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> ok.
-
-global_add(#{id := _} = GrainRef, Pid) ->
-    New = [partisan_remote_ref:from_term(Pid)],
-
-    case global_lookup(GrainRef) of
-        undefined ->
-            plum_db:put(?PDB_PREFIX, GrainRef, New);
-
-        [] ->
-            plum_db:put(?PDB_PREFIX, GrainRef, New);
-
-        L0 when is_list(L0) ->
-            %% We have multiple instances of this Grain or we have a
-            %% temporal inconsistency, we add the new grain process reference
-            %% removing all other local references (inconsistencies that occur
-            %% if this node failed before and we were not able to cleanup the
-            %% distributed registry).
-            %% @TODO If this server crashed, then we need to keep all local
-            %% processes and restored them (monitored) them, unless they are
-            %% dead, in which case we do exclude them
-            L = lists:usort(exclude_local(L0) ++ New),
-            plum_db:put(?PDB_PREFIX, GrainRef, L)
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% %% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec global_lookup(GrainRef :: erleans:grain_ref()) ->
-    [partisan_remote_ref:p()] | undefined.
-
-global_lookup(#{id := _} = GrainRef) ->
-    Opts = [
-        {resolver, fun exclude_dead_resolver/2},
-        {allow_put, false}
-    ],
-    global_lookup(GrainRef, Opts).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% %% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec global_lookup(GrainRef :: erleans:grain_ref(), Opts :: map()) ->
-    [partisan_remote_ref:p()] | undefined.
-
-global_lookup(#{id := _} = GrainRef, Opts) ->
-    case plum_db:get(?PDB_PREFIX, GrainRef, Opts) of
-        [] ->
-            undefined;
-        Other ->
-            Other
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec global_remove(
-    GrainRef :: erleans:grain_ref(),
-    Pid :: pid() | partisan_remote_ref:p()) -> ok.
-
-global_remove(#{id := _} = GrainRef, Term) ->
-    case global_lookup(GrainRef) of
-        undefined ->
-            ok;
-        [] ->
-            ok;
-        L when is_list(L) ->
-            do_global_remove(GrainRef, L, Term)
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-do_global_remove(GrainRef, L, Pid) when is_pid(Pid) ->
-    do_global_remove(GrainRef, L, partisan_remote_ref:from_term(Pid));
-
-do_global_remove(GrainRef, L0, ProcessRef) ->
-    case L0 -- [ProcessRef] of
-        [] ->
-            ok = plum_db:delete(?PDB_PREFIX, GrainRef);
-        L1 ->
-            ok = plum_db:put(?PDB_PREFIX, GrainRef, lists:usort(L1))
-    end.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-resolver(?TOMBSTONE, ?TOMBSTONE, _) ->
-    ?TOMBSTONE;
-
-resolver(?TOMBSTONE, L, Fun) when is_list(L), is_function(Fun, 1) ->
-    maybe_tombstone(Fun(L));
-
-resolver(L, ?TOMBSTONE, Fun) when is_list(L), is_function(Fun, 1) ->
-    maybe_tombstone(Fun(L));
-
-resolver(L1, L2, Fun) when is_list(L1), is_list(L2), is_function(Fun, 1) ->
-    %% Lists are sorted already as we sort them every time we do a put
-    maybe_tombstone(Fun(lists:umerge(L1, L2))).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-default_resolver(A, B) ->
-    resolver(A, B, fun(X) -> X end).
-
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-exclude_dead_resolver(A, B) ->
-    resolver(A, B, fun exclude_dead/1).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-exclude_unreachable_resolver(A, B) ->
-    resolver(A, B, fun exclude_unreachable/1).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-exclude_local_resolver(A, B) ->
-    resolver(A, B, fun exclude_local/1).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-maybe_tombstone([]) ->
-    ?TOMBSTONE;
-
-maybe_tombstone(L) ->
-    L.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc Returns a new list where all the process references that are local
-%% have been removed.
-%% @end
-%% -----------------------------------------------------------------------------
-exclude_local(undefined) ->
-    [];
-
-exclude_local(ProcessRefs) when is_list(ProcessRefs) ->
-    lists:filter(
-        fun(ProcessRef) ->
-            try
-                not partisan:is_local(ProcessRef)
-            catch
-                _:_ ->
-                    %% A remote process ref in a node we are not connected to
-                    true
-            end
-        end,
-        ProcessRefs
-    ).
 
 
 %% -----------------------------------------------------------------------------
@@ -858,102 +1074,35 @@ exclude_dead(ProcessRefs) when is_list(ProcessRefs) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @private
-%% @doc Returns a new list where all the process references are know to be
-%% reachable. A process is reachable if the process is local (and alive
-%% according to the existance of a monitor) or is remote and
-%% {@link partisan:is_process_alive/1} returns `true' for that process.
-%% @end
-%% -----------------------------------------------------------------------------
-exclude_unreachable(undefined) ->
-    [];
-
-exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
-    lists:filter(
-        fun(ProcessRef) ->
-            try
-                is_proc_alive(ProcessRef)
-            catch
-                _:_ ->
-                    false
-            end
-        end,
-        ProcessRefs
-    ).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec is_proc_alive(partisan_remote_ref:p()) -> boolean() | no_return().
-
-is_proc_alive(ProcessRef) ->
-    is_proc_alive(ProcessRef, undefined).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
--spec is_proc_alive(partisan_remote_ref:p(), erleans:grain_ref() | undefined) ->
-    boolean() | no_return().
-
-is_proc_alive(ProcessRef, undefined) ->
-    case partisan:is_local(ProcessRef) of
-        true ->
-            is_monitored(ProcessRef);
-        false ->
-            partisan:is_process_alive(ProcessRef)
-    end;
-
-is_proc_alive(ProcessRef, GrainRef) ->
-    case grain_ref(ProcessRef) of
-        {ok, GrainRef} ->
-            true;
-        {ok, _} ->
-            %% TODO send a cast to delete this entry!
-            false;
-        {error, _} ->
-            false
-    end.
-
-
-%% -----------------------------------------------------------------------------
 %% @doc Unregisters all local alive processes.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec unregister_all() -> ok.
 
 unregister_all() ->
-    true = ets:safe_fixtable(?TAB, true),
-    unregister_all(ets:first(?TAB)).
+    true = ets:safe_fixtable(?MONITOR_TAB, true),
+    unregister_all(ets:first(?MONITOR_TAB)).
 
 unregister_all(Pid) when is_pid(Pid) ->
-    %% {pgm, Pid, GrainRef, MRef}
-    GrainRef = ets:lookup_element(?TAB, Pid, 3),
-    ok = global_remove(GrainRef, Pid),
-    ok = local_remove(GrainRef, Pid),
-    unregister_all(ets:next(?TAB, Pid));
+    %% {Pid, GrainRef, MRef}
+    GrainRef = ets:lookup_element(?MONITOR_TAB, Pid, 2),
+    ok = do_unregister_name(GrainRef, Pid),
+    unregister_all(ets:next(?MONITOR_TAB, Pid));
 
 unregister_all(#{id := _} = GrainRef) ->
     %% Ignore as we have two entries per registration
     %% {Pid, GrainRef} and {GrainRef, Pid}, we just use the first
-    unregister_all(ets:next(?TAB, GrainRef));
+    unregister_all(ets:next(?MONITOR_TAB, GrainRef));
 
 unregister_all('$end_of_table') ->
-    true = ets:safe_fixtable(?TAB, false),
+    true = ets:safe_fixtable(?MONITOR_TAB, false),
     ok.
-
 
 
 
 %% =============================================================================
 %% TEST
 %% =============================================================================
-
 
 
 
@@ -965,12 +1114,12 @@ unregister_all('$end_of_table') ->
 %% This call is serialised the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
--spec register_name(GrainRef :: erleans:grain_ref()) ->
+-spec register_name(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok
     | {error, {already_in_use, partisan_remote_ref:p()}}.
 
-register_name(GrainRef) ->
-    partisan_gen_server:call(?MODULE, {register_name, GrainRef}).
+register_name(GrainRef, PRef) ->
+    partisan_gen_server:call(?MODULE, {register_name_test, GrainRef, PRef}).
 
 
 %% -----------------------------------------------------------------------------
@@ -978,11 +1127,11 @@ register_name(GrainRef) ->
 %% This call is serialised the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
--spec unregister_name(GrainRef :: erleans:grain_ref()) ->
+-spec unregister_name(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok | {error, badgrain | not_owner}.
 
-unregister_name(#{id := _} = GrainRef) ->
-    partisan_gen_server:call(?MODULE, {unregister_name, GrainRef}).
+unregister_name(#{id := _} = GrainRef, PRef) ->
+    partisan_gen_server:call(?MODULE, {unregister_name_test, GrainRef, PRef}).
 
 
 -endif.
