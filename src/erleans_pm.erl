@@ -198,7 +198,7 @@ unregister_name() ->
 %% -----------------------------------------------------------------------------
 %% @doc Returns a process reference for `GrainRef' unless there is no reference
 %% in which case returns `undefined'. This function calls
-%% {@link erlans_pm:whereis_name/2} passing the options `[safe]'.
+%% {@link erleans_pm:whereis_name/2} passing the options `[safe]'.
 %%
 %% Notice that as we use an eventually consistent model and temporarily support
 %% duplicated activations for a grain reference in different locations we could
@@ -206,7 +206,7 @@ unregister_name() ->
 %% first reference in the list that represents a live process. Checking for
 %% liveness incurs in a remote call for remote processes and thus can be
 %% expensive in the presence of multiple instanciations. If you prefer to avoid
-%% this check you can call {@link erlans_pm:whereis_name/2} passing [unsafe] as
+%% this check you can call {@link erleans_pm:whereis_name/2} passing [unsafe] as
 %% the second argument.
 %% @end
 %% -----------------------------------------------------------------------------
