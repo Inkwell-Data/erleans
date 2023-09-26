@@ -44,7 +44,7 @@
  {<<"recon">>,{pkg,<<"recon">>,<<"2.5.3">>},1},
  {<<"sbroker">>,
   {git,"https://github.com/Leapsight/sbroker.git",
-       {ref,"2ef8d0b0db927c8425c0a839f4cd264e6dbbce84"}},
+       {ref,"c17ffb198dcba9719bba42072c50743902a618f2"}},
   0},
  {<<"sext">>,{pkg,<<"sext">>,<<"1.8.0">>},1},
  {<<"telemetry">>,{pkg,<<"telemetry">>,<<"1.2.1">>},0},
