@@ -861,7 +861,7 @@ sync_local_view(Peer, GrainKey, RemotePRef) ->
         [] ->
             ok;
 
-        [#reg{key = {Id, ImplMod} = type = local, pid = LocalPRef} | _] ->
+        [#reg{key = {Id, ImplMod} = {type, local}, pid = LocalPRef} | _] ->
             GrainRef = erleans:get_grain(ImplMod, Id),
             case erleans_grain:is_location_right(GrainRef, LocalPRef) of
                 true ->
