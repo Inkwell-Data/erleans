@@ -43,7 +43,8 @@ the lease time of a grain.
          cancel/1,
          recoverable_cancel/0,
          check/0,
-         recover/0]).
+         recover/0,
+         finished/1]).
 
 -record(timer,
         {
@@ -51,7 +52,9 @@ the lease time of a grain.
           grain_ref :: erleans:grain_ref() | undefined,
           callback :: function(),
           args :: term(),
-          period :: pos_integer() | never
+          period :: pos_integer() | never,
+          deadline :: integer(),
+          fired :: reference() | undefined
         }).
 
 -opaque timer() :: #timer{}.
@@ -71,8 +74,13 @@ start(Callback, Args, StartTime, Period) ->
                        grain_ref = GrainRef,
                        callback = Callback,
                        args = Args,
-                       period = Period},
-            Pid = start_timer(StartTime, Timer),
+                       period = Period,
+                       deadline = erlang:monotonic_time(millisecond) + StartTime,
+                       fired = case Period of
+                                   never -> atomics:new(1, []);
+                                   _ -> undefined
+                               end},
+            Pid = start_timer(Timer#timer.deadline, Timer),
             case get(?key) of
                 undefined ->
                     put(?key, #{Pid => Timer});
@@ -147,17 +155,42 @@ recover() ->
         undefined ->
             ok;
         Map when is_map(Map) ->
-            NewMap = maps:fold(fun(_Pid, #timer{period = never}, Acc) ->
-                                       %% One-shots must not run again, even if their
-                                       %% callback is still finishing deactivation.
-                                       Acc;
-                                  (_Pid, Timer, Acc) ->
-                                       NewPid = start_timer(Timer#timer.period, Timer),
-                                       Acc#{NewPid => Timer}
-                               end, #{}, Map),
+            NewMap = maps:fold(fun recover_timer/3, #{}, Map),
             erase(?recovery),
             put(?key, NewMap)
     end.
+
+
+%% Internal completion notifications are consumed by the grain, not callbacks.
+finished(Pid) ->
+    lists:foreach(fun(Key) ->
+        case get(Key) of
+            Map when is_map(Map) -> put(Key, maps:remove(Pid, Map));
+            _ -> ok
+        end
+    end, [?key, ?recovery]),
+    ok.
+
+recover_timer(Pid, #timer{period=never, fired=Fired, deadline=Deadline}=Timer, Acc) ->
+    case atomics:compare_exchange(Fired, 1, 0, 2) of
+        ok ->
+            %% Retire the old timer before replacing it. If its tick already
+            %% won the race, the in-flight branch below keeps tracking it.
+            NewTimer = Timer#timer{fired=atomics:new(1, [])},
+            NewPid = start_timer(Deadline, NewTimer),
+            Acc#{NewPid => NewTimer};
+        1 ->
+            %% Keep tracking an in-flight callback so another deactivation
+            %% still waits for it, but never start it again.
+            case is_process_alive(Pid) of
+                true -> Acc#{Pid => Timer};
+                false -> Acc
+            end;
+        2 -> Acc
+    end;
+recover_timer(_Pid, #timer{period=Period}=Timer, Acc) ->
+    NewPid = start_timer(erlang:monotonic_time(millisecond) + Period, Timer),
+    Acc#{NewPid => Timer}.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -174,35 +207,46 @@ loop(FireTime, #timer{grain = Pid,
             unlink(Pid),
             ok;
         ?tick ->
-            try Callback(GrainRef, Args) of
-                _ ->
-                    case Period of
-                        never ->
-                            unlink(Pid),
-                            ok;
+            case claim_tick(Timer) of
+                false -> timer_finished(Pid);
+                true ->
+                    try Callback(GrainRef, Args) of
                         _ ->
-                            NextFire = FireTime + Period,
-                            erlang:send_after(NextFire, self(), ?tick,
-                                              [{abs, true}]),
-                            loop(NextFire, Timer)
+                            case Period of
+                                never ->
+                                    timer_finished(Pid);
+                                _ ->
+                                    NextFire = FireTime + Period,
+                                    erlang:send_after(NextFire, self(), ?tick,
+                                                      [{abs, true}]),
+                                    loop(NextFire, Timer)
+                            end
+                    catch Class:Error ->
+                            Pid ! {erleans_timer_error, Class, Error},
+                            timer_finished(Pid)
                     end
-            catch Class:Error ->
-                    Pid ! {erleans_timer_error, Class, Error},
-                    unlink(Pid)
             end;
         Msg ->
             Pid ! {erleans_timer_unexpected_msg, Msg},
-            unlink(Pid),
-            ok
+            timer_finished(Pid)
     end.
 
-start_timer(StartTime, Timer) ->
+%% A first tick and recovery compete to claim or retire the old one-shot.
+%% A retired timer cannot run its callback after a replacement has started.
+claim_tick(#timer{period=never, fired=Fired}) ->
+    atomics:compare_exchange(Fired, 1, 0, 1) =:= ok;
+claim_tick(_) -> true.
+
+timer_finished(Pid) ->
+    unlink(Pid),
+    Pid ! {erleans_timer_finished, self()},
+    ok.
+
+start_timer(FirstFire, Timer) ->
     spawn_link(fun() ->
                    %% requests to a grain from a timer callback
                    %% do not reset the activation expiry timer
                    put(req_type, leave_timer),
-                   Now = erlang:monotonic_time(milli_seconds),
-                   FirstFire = Now + StartTime,
                    erlang:send_after(FirstFire, self(), ?tick,
                                      [{abs, true}]),
                    loop(FirstFire, Timer)

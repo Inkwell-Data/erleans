@@ -413,6 +413,9 @@ timer_check(Data) ->
             {keep_state, Data, [{state_timeout, 50, check_timers}]}
     end.
 
+handle_event(info, {erleans_timer_finished, Pid}, _, _Data) ->
+    erleans_timer:finished(Pid),
+    keep_state_and_data;
 handle_event(_, {cancel_timer, _Pid, _TimeLeft}, _, _Data) ->
     %% filter these out
     keep_state_and_data;

@@ -11,6 +11,8 @@ the results of messages sent to it.
 
 -behaviour(erleans_grain).
 
+-include("erleans_timer.hrl").
+
 -export([placement/0,
          provider/0,
          save/1,
@@ -79,6 +81,9 @@ handle_call({start_timer, Callback, Start, Period}, From, State) ->
     Result = erleans_timer:start(Callback, undefined, Start, Period),
     {ok, State, [{reply, From, Result}]};
 
+handle_call(timer_pids, From, State) ->
+    Pids = case get(?key) of undefined -> []; Timers -> maps:keys(Timers) end,
+    {ok, State, [{reply, From, Pids}]};
 handle_call(clear, From, State = #{acc := Acc}) ->
     {ok, State#{acc => []}, [{reply, From, {ok, Acc}}]};
 handle_call({accumulate, Thing}, From, State=#{acc := Acc}) ->

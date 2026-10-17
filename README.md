@@ -61,6 +61,12 @@ A transport failure can happen after a request has executed but before its reply
 arrives. Retrying that request can repeat side effects; operations which need to
 avoid duplicates should use application-level request IDs and deduplication.
 
+Timers canceled during deactivation can be recovered if a request revives the
+activation. Unfired one-shot timers retain their original deadlines; overdue
+ones fire as soon as they are recovered. A one-shot that already started is
+never replayed, and deactivation still waits for its running callback to finish.
+Completed timers are removed from the activation's timer bookkeeping.
+
 ### Grain keys
 
 Each grain module declares one key type with an optional `key_type/0` callback.

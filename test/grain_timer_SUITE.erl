@@ -16,11 +16,16 @@
          crashy_timer/1,
          stray_timer_message/1,
          recover_with_one_shots/1,
+         recover_unfired_one_shot/1,
+         completed_one_shots_removed/1,
          timer_requests_during_deactivation/1,
          timer_shutdown/1]).
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
+
+-include("erleans_timer.hrl").
+-include("test_utils.hrl").
 
 -define(g, timer_test_grain).
 
@@ -30,8 +35,8 @@ all() ->
 
 groups() ->
     [{defaults, [], [single_timer, multiple_timers, crashy_timer, stray_timer_message,
-                    recover_with_one_shots,
-                    timer_requests_during_deactivation]},
+                    recover_with_one_shots, recover_unfired_one_shot,
+                    completed_one_shots_removed, timer_requests_during_deactivation]},
      {deactivate_after_30, [], [timer_shutdown]}].
 
 init_per_suite(Config) ->
@@ -165,6 +170,76 @@ recover_with_one_shots(_Config) ->
     ?assertEqual(Pid, erleans_grain_registry:whereis_name(Grain)),
     ?assertEqual({ok, node()}, ?g:node(Pid)),
     ok = ?g:cancel_one_timer(Pid).
+
+completed_one_shots_removed(_) ->
+    Grain = erleans:get_grain(?g, <<"completed-one-shots-removed">>),
+    Test = self(),
+    Tag = make_ref(),
+    Callback = fun(_, _) -> Test ! {Tag, completed} end,
+    [erleans_grain:call(Grain, {start_timer, Callback, 0, never})
+     || _ <- lists:seq(1, 100)],
+    [receive {Tag, completed} -> ok after 1000 -> ct:fail(timer_not_fired) end
+     || _ <- lists:seq(1, 100)],
+    ?UNTIL(erleans_grain:call(Grain, timer_pids) =:= []),
+    %% Internal cleanup notifications must not reach the grain's handle_info.
+    ?assertEqual({ok, []}, ?g:clear(Grain)).
+
+recover_unfired_one_shot(_) ->
+    Grain = erleans:get_grain(?g, <<"recover-unfired-one-shot">>),
+    Test = self(),
+    Tag = make_ref(),
+    Blocker = fun(_, _) ->
+        Test ! {Tag, blocked, self()},
+        receive finish -> ok end
+    end,
+    {ok, BlockerPid} = erleans_grain:call(Grain, {start_timer, Blocker, 0, never}),
+    true = is_pid(BlockerPid),
+    receive {Tag, blocked, BlockerPid} -> ok after 1000 -> ct:fail(timer_not_started) end,
+    BlockerMonitor = monitor(process, BlockerPid),
+    Callback = fun(_, _) -> Test ! {Tag, fired, self(), erlang:monotonic_time(millisecond)} end,
+    Start = erlang:monotonic_time(millisecond),
+    {ok, Pending} = erleans_grain:call(Grain, {start_timer, Callback, 300, never}),
+    true = is_pid(Pending),
+    %% Force an old tick to be ahead of cancellation, but not yet claimed.
+    true = erlang:suspend_process(Pending),
+    try
+        Pending ! ?tick,
+        Pid = erleans_grain_registry:whereis_name(Grain),
+        true = is_pid(Pid),
+        ok = ?g:stop(Pid),
+        ?assertMatch({deactivating, _}, sys:get_state(Pid)),
+        ?assertEqual({ok, node()}, ?g:node(Pid)),
+        true = erlang:resume_process(Pending),
+        %% The old timer must not invoke its callback after recovery replaced it.
+        Fired = receive {Tag, fired, FiredPid, Time} ->
+                    ?assertNotEqual(Pending, FiredPid),
+                    ?assert(Time >= Start + 300),
+                    FiredPid
+                after 1000 -> ct:fail(unfired_timer_not_recovered)
+                end,
+        FiredMonitor = monitor(process, Fired),
+        receive {'DOWN', FiredMonitor, process, Fired, _} -> ok
+        after 1000 -> ct:fail(one_shot_not_finished)
+        end,
+        ?UNTIL(erleans_grain:call(Pid, timer_pids) =:= [BlockerPid]),
+        %% Revival must keep tracking callbacks still running on the old timer.
+        GrainMonitor = monitor(process, Pid),
+        ok = ?g:stop(Pid),
+        ?assertMatch({deactivating, _}, sys:get_state(Pid)),
+        BlockerPid ! finish,
+        receive {'DOWN', BlockerMonitor, process, BlockerPid, normal} -> ok
+        after 1000 -> ct:fail(blocker_not_finished)
+        end,
+        receive {'DOWN', GrainMonitor, process, Pid, {shutdown, deactivated}} -> ok
+        after 1000 -> ct:fail(grain_not_deactivated)
+        end,
+        receive {Tag, fired, _, _} -> ct:fail(one_shot_repeated)
+        after 0 -> ok
+        end
+    after
+        try erlang:resume_process(Pending) catch error:badarg -> ok end,
+        BlockerPid ! finish
+    end.
 
 timer_requests_during_deactivation(_Config) ->
     Grain = erleans:get_grain(?g, <<"timer-requests-during-deactivation">>),
