@@ -32,7 +32,10 @@ read_by_hash(Type, Name, Hash) ->
 
 insert(_, _, <<"insert_failure">>, _) -> {error, insert_failed};
 insert(Type, Name, Id, State) ->
-    result(erleans_provider_ets:insert(Type, Name, Id, State)).
+    case etag_test_grain:test_control(Id) of
+        {insert_error, Reason} -> {error, Reason};
+        _ -> result(erleans_provider_ets:insert(Type, Name, Id, State))
+    end.
 
 insert(Type, Name, Id, Hash, State) ->
     result(erleans_provider_ets:insert(Type, Name, Id, Hash, State)).

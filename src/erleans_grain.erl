@@ -148,7 +148,7 @@ call(GrainRef, Request, Timeout) ->
                                   is_tuple(Reason), tuple_size(Reason) =:= 3,
                                   element(1, Reason) =:= bad_etag ->
                                ?LOG_ERROR("at=grain_exit reason=saved_etag_changed", []),
-                               {exit, saved_etag_changed}
+                               exit(saved_etag_changed)
                        end
                end, Deadline, ?ROUTING_RETRIES),
     %% Raise only after routing and pool claiming have completed. A callback
@@ -312,10 +312,7 @@ init_(Parent, GrainRef=#{id := Id,
         _ ->
             case erleans_utils:fun_or_default(CbModule, activate, 2, [GrainRef, CbData], {ok, CbData, #{}}) of
                 {ok, CbData1, GrainOpts} ->
-                    %% A first activation reserves the row with the initial
-                    %% state, not the mutations returned by activate/2.
-                    ETag1 = maybe_insert_initial_state(CbModule, Id, Provider, ETag, CbData),
-                    enter_loop(GrainRef, CbModule, Id, Provider, ETag1, GrainOpts, CbData1);
+                    enter_loop(GrainRef, CbModule, Id, Provider, ETag, GrainOpts, CbData1);
                 {error, Reason} ->
                     %% In particular, notfound must not look like a retryable
                     %% normal/shutdown exit to callers waiting for activation.
@@ -529,19 +526,10 @@ upd_timer(refresh_timer, DeactivateAfter) ->
 %% automatically started when referenced stopping doesn't make much sense in the
 %% traditional sense. Maybe it should be removed or at least renamed and maybe act as
 %% recoverable?
-finalize_and_stop(Data=#data{cb_module=CbModule,
-                             id=Id,
-                             ref=Ref,
-                             provider=Provider,
-                             cb_state=CbData,
-                             etag=ETag}) ->
+finalize_and_stop(Data=#data{cb_module=CbModule, ref=Ref, cb_state=CbData}) ->
     Stop = case erleans_utils:fun_or_default(CbModule, deactivate, 1, [CbData], {ok, CbData}) of
-        {save_state, NewCbData={_, PersistentState}} ->
-            NewETag = update_state(CbModule, Provider, Id, PersistentState, ETag),
-            {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData,
-                                                      etag=NewETag}};
         {save_state, NewCbData} ->
-            NewETag = update_state(CbModule, Provider, Id, NewCbData, ETag),
+            NewETag = update_state(NewCbData, Data),
             {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData,
                                                       etag=NewETag}};
         {ok, NewCbData} ->
@@ -676,38 +664,18 @@ write_state({_Ephemeral, Persistent}, Data) ->
 write_state(_CbData, #data{provider=undefined}) ->
     exit(?NO_PROVIDER_ERROR);
 write_state(CbData, #data{id=Id, cb_module=Module,
+                        provider={Provider, Name}, etag=undefined}) ->
+    %% A missing row stays absent until a save. Conditional insert detects a
+    %% competing first writer without overwriting its state.
+    Provider:insert(Module, Name, Id, CbData);
+write_state(CbData, #data{id=Id, cb_module=Module,
                         provider={Provider, Name}, etag=ETag}) ->
     Provider:update(Module, Name, Id, CbData, ETag).
 
-update_state({_Ephemeral, Persistent}, Data) ->
-    update_state(Persistent, Data);
-update_state(CbData, #data{id=Id,
-                           cb_module=CbModule,
-                           provider=Provider,
-                           etag=ETag}) ->
-    update_state(CbModule, Provider, Id, CbData, ETag).
-
-update_state(_CbModule, undefined, _Id, _CbData, _ETag) ->
-    exit(?NO_PROVIDER_ERROR);
-update_state(CbModule, {Provider, ProviderName}, Id, Data, ETag) ->
-    case Provider:update(CbModule, ProviderName, Id, Data, ETag) of
+update_state(CbData, Data) ->
+    case write_state(CbData, Data) of
         {ok, NewETag} ->
             NewETag;
-        {error, Reason} ->
-            exit(save_error(Reason))
-    end.
-
-maybe_insert_initial_state(CbModule, Id, {Provider, ProviderName}, undefined, {_, CbData}) ->
-    insert_state(CbModule, Provider, ProviderName, Id, CbData);
-maybe_insert_initial_state(CbModule, Id, {Provider, ProviderName}, undefined, CbData) ->
-    insert_state(CbModule, Provider, ProviderName, Id, CbData);
-maybe_insert_initial_state(_, _, _, ETag, _) ->
-    ETag.
-
-insert_state(CbModule, Provider, ProviderName, Id, CbData) ->
-    case Provider:insert(CbModule, ProviderName, Id, CbData) of
-        {ok, ETag} ->
-            ETag;
         {error, Reason} ->
             exit(save_error(Reason))
     end.

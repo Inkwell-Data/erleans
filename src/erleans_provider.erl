@@ -21,10 +21,12 @@
 %% Providers generate ETags and atomically check them when writing. A successful
 %% write returns a fresh token even when the payload has not changed. undefined
 %% is reserved for a missing row and must not be returned as a stored ETag.
+%% Activation only reads. The first save of a missing row uses insert; subsequent
+%% saves use update with the ETag returned by the last read or write.
 %% Conflicts may use bad_etag or {bad_etag, ExpectedETag, StoredETag} as the
 %% error reason. Grains normalize these to saved_etag_changed. A save continuation
 %% may reload after a conflict; otherwise the activation exits with that reason
-%% and waiting calls receive {exit, saved_etag_changed}.
+%% and waiting calls exit with saved_etag_changed.
 -type write_result() :: {ok, erleans:etag()} | {error, term()}.
 
 -callback start_link(ProviderName :: atom(), Args :: list()) -> {ok, pid()}.

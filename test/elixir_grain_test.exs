@@ -35,10 +35,13 @@ defmodule Erleans.GrainTest do
       assert_receive {:DOWN, ^monitor, :process, ^pid, {:shutdown, :deactivated}}, 1000
 
       expected = if save?, do: 1, else: 0
-      version = if save?, do: 2, else: 1
+      stored = :erleans_provider_ets.read(Erleans.ElixirTestGrain, :in_memory, ref.id)
 
-      assert {:ok, %{counter: ^expected}, ^version} =
-               :erleans_provider_ets.read(Erleans.ElixirTestGrain, :in_memory, ref.id)
+      if save? do
+        assert {:ok, %{counter: ^expected}, 1} = stored
+      else
+        assert {:error, :not_found} = stored
+      end
 
       assert expected == Erleans.Grain.call(ref, :get)
     end

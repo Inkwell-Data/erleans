@@ -1,7 +1,7 @@
 -module(grain_fault_SUITE).
 
 -export([all/0, init_per_suite/1, end_per_suite/1,
-         callback_exceptions/1, queued_calls/1, stateful_reroute/1,
+         callback_exceptions/1, conflict_exits/1, queued_calls/1, stateful_reroute/1,
          stateless_reroute/1, direct_pid_no_retry/1, timeout_no_retry/1,
          retry_limit/1, retry_deadline/1, remaining_timeout/1, pool_timeout/1]).
 
@@ -10,7 +10,7 @@
 -include("erleans.hrl").
 
 all() ->
-    [callback_exceptions, queued_calls, stateful_reroute, stateless_reroute,
+    [callback_exceptions, conflict_exits, queued_calls, stateful_reroute, stateless_reroute,
      direct_pid_no_retry, timeout_no_retry, retry_limit, retry_deadline,
      remaining_timeout, pool_timeout].
 
@@ -38,16 +38,34 @@ callback_exceptions(_) ->
         end, [{error, badarg}, {throw, thrown}, {exit, shutdown},
               {exit, {shutdown, deactivated}}, {exit, noconnection},
               {exit, {noproc, {gen_statem, call, []}}}, {exit, bad_etag},
-              {exit, {bad_etag, old, new}}]),
+              {exit, {bad_etag, old, new}}, {exit, saved_etag_changed},
+              {exit, {bad_etag, {gen_statem, call, []}}},
+              {exit, {saved_etag_changed, {gen_statem, call, []}}}]),
         ?assertEqual(2, erleans_grain:call(Grain, increment)),
         %% Ordinary reply data cannot be confused with an exception envelope.
         Reply = {'$erleans_callback_error', make_ref(), error, data, []},
         ?assertEqual(Reply, erleans_grain:call(Grain, {reply, Reply})),
+        ?assertEqual({exit, saved_etag_changed},
+                     erleans_grain:call(Grain, {reply, {exit, saved_etag_changed}})),
         erleans_grain:cast(Grain, crash),
         ?assertEqual(Pid, erleans_grain:call(Grain, pid)),
         Pid ! crash,
         ?assertEqual(Pid, erleans_grain:call(Grain, pid))
     end, [prefer_local, {stateless, 1}]).
+
+conflict_exits(_) ->
+    lists:foreach(fun({Placement, TargetKind, Reason}) ->
+        Grain = grain(Placement),
+        Pid = stand_in(Grain, Reason),
+        Target = case TargetKind of ref -> Grain; pid -> Pid end,
+        %% Conflicts must escape as exits, including through pool claims. A
+        %% routing retry would activate fault_test_grain and return a PID.
+        ?assertExit(saved_etag_changed, ok = erleans_grain:call(Target, pid)),
+        ?assertNot(is_process_alive(Pid))
+    end, [{Placement, TargetKind, Reason}
+          || Placement <- [prefer_local, {stateless, 1}],
+             TargetKind <- [ref, pid],
+             Reason <- [saved_etag_changed, bad_etag, {bad_etag, old, new}]]).
 
 queued_calls(_) ->
     Grain = grain(prefer_local),

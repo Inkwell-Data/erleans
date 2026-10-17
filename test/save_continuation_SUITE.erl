@@ -1,7 +1,8 @@
 -module(save_continuation_SUITE).
 
 -export([all/0, init_per_suite/1, end_per_suite/1,
-         save_success/1, conflict_reload/1, unhandled_conflict/1,
+         save_success/1, first_save_success/1, first_save_conflict_reload/1,
+         first_save_error/1, conflict_reload/1, unhandled_conflict/1,
          handled_stop/1, storage_error/1, invalid_recovery/1,
          reload_failure/1, continuation_failure/1, reload_serialization/1,
          duplicate_save/1, asynchronous_callbacks/1]).
@@ -11,7 +12,8 @@
 -include("test_utils.hrl").
 
 all() ->
-    [save_success, conflict_reload, unhandled_conflict, handled_stop,
+    [save_success, first_save_success, first_save_conflict_reload, first_save_error,
+     conflict_reload, unhandled_conflict, handled_stop,
      storage_error, invalid_recovery, reload_failure, continuation_failure,
      reload_serialization, duplicate_save, asynchronous_callbacks].
 
@@ -39,6 +41,61 @@ save_success(_) ->
     %% The next write must use the ETag installed before the continuation.
     ok = erleans_grain:call(Pid, save),
     ?assertEqual({ok, Candidate, <<"version:3">>}, read(Id)).
+
+first_save_success(_) ->
+    lists:foreach(fun(Kind) ->
+        {Grain, Id, Pid} = unsaved_grain(),
+        Persistent = #{value => first_save},
+        Candidate = wrap(Kind, make_ref(), Persistent),
+        Reply = actions(Grain, Candidate, fun(From) ->
+            [{save_state, fun(ok) ->
+                ?assertEqual({ok, Persistent, <<"version:1">>}, read(Id)),
+                {continue, [{reply, From, saved}]}
+            end}]
+        end),
+        ?assertEqual(saved, Reply),
+        ?assertEqual(Candidate, erleans_grain:call(Pid, state)),
+        ok = erleans_grain:call(Pid, save),
+        ?assertEqual({ok, Persistent, <<"version:2">>}, read(Id))
+    end, [plain, ephemeral]).
+
+first_save_conflict_reload(_) ->
+    lists:foreach(fun(Kind) ->
+        {Grain, Id, Pid} = unsaved_grain(),
+        Ephemeral = make_ref(),
+        Previous = wrap(Kind, Ephemeral, #{value => unsaved}),
+        ok = actions(Grain, Previous, fun(From) -> [{reply, From, ok}] end),
+        Winner = #{value => winner},
+        %% Another writer inserts after this activation read a missing row.
+        {ok, <<"version:1">>} = opaque_etag_provider:insert(etag_test_grain, in_memory, Id, Winner),
+        Reloaded = wrap(Kind, Ephemeral, Winner),
+        Reply = actions(Grain, wrap(Kind, make_ref(), #{value => rejected}), fun(From) ->
+            [{save_state, fun({error, saved_etag_changed}) ->
+                {reload, fun(State) ->
+                    ?assertEqual(Reloaded, State),
+                    {continue, [{reply, From, recovered}]}
+                end}
+            end}]
+        end),
+        ?assertEqual(recovered, Reply),
+        ?assertEqual(Pid, erleans_grain_registry:whereis_name(Grain)),
+        ?assertEqual({ok, Winner, <<"version:1">>}, read(Id)),
+        ok = erleans_grain:call(Pid, save),
+        ?assertEqual({ok, Winner, <<"version:2">>}, read(Id))
+    end, [plain, ephemeral]).
+
+first_save_error(_) ->
+    {Grain, Id, Pid} = unsaved_grain(),
+    Monitor = monitor(process, Pid),
+    etag_test_grain:set_test_control(Id, {insert_error, insert_failed}),
+    ?assertEqual(unavailable, actions(Grain, #{value => rejected}, fun(From) ->
+        [{reply, From, wrong_reply},
+         {save_state, fun({error, insert_failed}) ->
+             {stop, [{reply, From, unavailable}]}
+         end}]
+    end)),
+    down(Pid, Monitor, {save_failed, insert_failed}),
+    ?assertEqual({error, not_found}, read(Id)).
 
 conflict_reload(_) ->
     lists:foreach(fun(Kind) ->
@@ -76,7 +133,7 @@ unhandled_conflict(_) ->
         {Grain, Id, Pid} = grain(),
         Monitor = monitor(process, Pid),
         etag_test_grain:set_test_control(Id, {write_error, Reason}),
-        ?assertEqual({exit, saved_etag_changed}, erleans_grain:call(Grain, save)),
+        ?assertExit(saved_etag_changed, ok = erleans_grain:call(Grain, save)),
         down(Pid, Monitor, saved_etag_changed),
         ?assertEqual({ok, #{value => a}, <<"version:1">>}, read(Id))
     end, [bad_etag, {bad_etag, <<"version:1">>, <<"version:2">>}]).
@@ -236,10 +293,16 @@ asynchronous_callbacks(_) ->
     end, [cast, info]).
 
 grain() ->
+    {Grain, _, _} = Result = unsaved_grain(),
+    ok = erleans_grain:call(Grain, save),
+    Result.
+
+unsaved_grain() ->
     Id = etag_test_grain:test_key(undefined),
     Ref = erleans:get_grain(etag_test_grain, Id),
     Grain = Ref#{provider => {opaque_etag_provider, in_memory}},
     ?assertEqual(a, erleans_grain:call(Grain, get)),
+    ?assertEqual({error, not_found}, read(Id)),
     {Grain, Id, erleans_grain_registry:whereis_name(Grain)}.
 
 actions(Grain, Candidate, Fun) ->

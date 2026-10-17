@@ -42,6 +42,7 @@ check_concurrent_activation({Placement, Stage}) ->
         Healthy = erleans:get_grain(fault_test_grain,
                                     integer_to_binary(erlang:unique_integer([positive]))),
         HealthyPid = erleans_grain:call(Healthy, pid),
+        true = is_pid(HealthyPid),
         ok = supervisor:terminate_child(erleans_grain_sup, HealthyPid),
         ?assertNot(is_process_alive(HealthyPid)),
         [await_call(Pid, 100) || Pid <- Pids],
@@ -84,7 +85,7 @@ activation_failures(_) ->
                 state -> Pid ! {Tag, read_result, {ok, notfound, 1}};
                 activate ->
                     Pid ! {Tag, read_result, {ok, {Test, Tag}, 1}},
-                    Pid = await_stage(Tag, activating),
+                    ?assertEqual(Pid, await_stage(Tag, activating)),
                     Pid ! {Tag, activate_result, {error, Reason}}
             end,
             normal_down(Caller, Monitor),

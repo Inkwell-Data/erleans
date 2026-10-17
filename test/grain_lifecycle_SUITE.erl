@@ -103,12 +103,13 @@ bad_etag_save(_Config) ->
 
     ?assertEqual({ok, 1}, test_grain:activated_counter(Grain)),
 
+    ok = test_grain:save(Grain),
     {ok, _, OldETag} = ProviderModule:read(test_grain, ProviderName, <<"bad-etag-save-grain">>),
     NewState = #{activated_counter => 2, deactivated_counter => 0, call_counter => 0},
     {ok, _NewETag} = ProviderModule:update(test_grain, ProviderName, <<"bad-etag-save-grain">>, NewState, OldETag),
 
     %% Now a save call should crash the grain
-    ?assertMatch({exit, saved_etag_changed}, test_grain:save(Grain)),
+    ?assertExit(saved_etag_changed, ok = test_grain:save(Grain)),
 
     ?UNTIL(erleans_grain_registry:whereis_name(Grain) =:= undefined),
 

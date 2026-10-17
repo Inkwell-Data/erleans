@@ -156,21 +156,32 @@ Interface that must be implemented for any persistent store to be used for grain
 Storage providers generate ETags; grains never compute them from the payload:
 
 * `read(Type, ProviderName, Id)` returns `{ok, State, ETag}` or `{error, not_found}`. Other read errors stop activation.
-* `insert(Type, ProviderName, Id, State)` atomically inserts only when no row exists for that type and id, and returns `{ok, ETag}`. A competing insert returns `{error, bad_etag}` and stops activation.
+* `insert(Type, ProviderName, Id, State)` atomically inserts only when no row exists for that type and id, and returns `{ok, ETag}`. A competing insert returns `{error, bad_etag}` and is handled as a save conflict.
 * `update(Type, ProviderName, Id, State, ETag)` atomically checks the stored ETag, writes the state, and returns `{ok, NewETag}`. A stale ETag returns `{error, bad_etag}`; a missing row must also be rejected, using `{error, not_found}` or `{error, bad_etag}`.
 * The explicit-hash variants are `insert(Type, ProviderName, Id, Hash, State)` and `update(Type, ProviderName, Id, Hash, State, ETag)`. This hash is a lookup aid, not an ETag.
 
-`undefined` is reserved for state that has not been read or inserted. Providers may use integer, binary, or other token representations. Tokens must not be reused across successful writes to an existing row, including when the payload changes from A to B and back to A.
+`undefined` is reserved for an activation whose initial read found no row and which has not yet saved or reloaded an existing row. Providers may use integer, binary, or other token representations. Tokens must not be reused across successful writes to an existing row, including when the payload changes from A to B and back to A.
 
 This changes the provider API: remove the ETag input from `insert` and the caller-computed new ETag input from `update`, and return `{ok, ETag}` instead of `ok`. Existing providers must be updated before use with this version.
 
 The separate [PostgreSQL provider](https://github.com/erleans/erleans_provider_pgo) uses a database-owned version column, as in [Orleans PostgreSQL persistence](https://github.com/dotnet/orleans/blob/main/src/AdoNet/Orleans.Persistence.AdoNet/PostgreSQL-Persistence.sql): a conditional insert returns version `1`, and an update uses `SET version = version + 1 WHERE ... AND version = $expected RETURNING version`. Uniqueness on the complete grain key prevents concurrent inserts from both succeeding. The database version is returned as the ETag, and a failed condition maps to `{error, bad_etag}`.
 
-After a successful first activation, a missing row is conditionally inserted
-using the initial persistent state from `state/1` (or `#{}` when it is absent).
-Changes returned by `activate/2` remain in memory, on both first and subsequent
-activations, until a `save_state` action or a `{save_state, State}` result from
-`deactivate/1` persists them. Failed activation does not insert a row.
+Persistence is lazy. Activating a grain reads its saved state or initializes
+in-memory state using `state/1` (or `#{}` when it is absent); activation never
+inserts a row. Reading unknown IDs therefore does not create stored records
+unless the grain itself requests a save, including from `deactivate/1`.
+
+The first save after a missing-row read uses conditional `insert`; later saves
+use conditional `update` with the provider's returned ETag. This applies to
+`save_state`, save continuations, and `{save_state, State}` from `deactivate/1`.
+A competing first insert is detected at save time and follows the same conflict
+handling as a stale update, including continuation-based reload.
+
+Initial state and changes returned by `activate/2` remain in memory until saved.
+If the row was missing and the activation ends without saving, its next
+activation initializes again.
+This changes the previous behavior, which inserted the initial state on first
+activation: applications that require a stored record must explicitly save it.
 
 [Streams](https://github.com/erleans/erleans_streams) have a provider type as well for providing a pluggable stream layer.
 
@@ -226,8 +237,9 @@ returned replies. Continuations return actions, not another state, and cannot
 return additional save actions.
 
 A bare `save_state` conflict terminates the process with `saved_etag_changed`.
-Waiting `erleans_grain:call` callers retain the `{exit, saved_etag_changed}`
-result. Other provider errors can be handled with `{stop, Replies}`; continuing
+Waiting `erleans_grain:call` callers also exit with `saved_etag_changed`, without
+retrying. A legitimate `{exit, saved_etag_changed}` reply remains ordinary data.
+Other provider errors can be handled with `{stop, Replies}`; continuing
 without a successful reload is disallowed. Reload is limited to conflicts:
 an arbitrary storage error, such as a timeout, does not establish whether a
 write committed and is not safely resolved by simply reading once.
