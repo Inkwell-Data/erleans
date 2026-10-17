@@ -22,7 +22,8 @@
          existing_global_registration/1,
          callback_crash_does_not_save/1,
          shutdown_saves_state/1,
-         local_activations/1]).
+         local_activations/1,
+         queued_casts_on_deactivation/1]).
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
@@ -41,7 +42,8 @@ groups() ->
      {deactivate_after_60, [], [bad_etag_save]},
      {deactivate_after_30, [], [request_types]},
      {deactivate_after_50000, [], [local_activations, existing_global_registration,
-                                  callback_crash_does_not_save, shutdown_saves_state]}].
+                                  callback_crash_does_not_save, shutdown_saves_state,
+                                  queued_casts_on_deactivation]}].
 
 init_per_suite(Config) ->
     Config.
@@ -285,3 +287,45 @@ local_activations(_Config) ->
                     error(loop_timeout)
             end
      end)(0).
+
+queued_casts_on_deactivation(_) ->
+    lists:foreach(fun(Placement) ->
+        Ref = erleans:get_grain(etag_test_grain,
+                               integer_to_binary(erlang:unique_integer([positive]))),
+        Grain = Ref#{placement => Placement, provider => undefined},
+        ?assertEqual(a, erleans_grain:call(Grain, get)),
+        Old = erleans_grain_registry:whereis_name(Grain),
+        true = is_pid(Old),
+        Monitor = monitor(process, Old),
+        Tag = make_ref(),
+        ok = erleans_grain:call(Grain, {deactivate, self(), Tag, no_save}),
+        receive {Tag, deactivating, Old} -> ok
+        after 1000 -> ct:fail(deactivation_not_started)
+        end,
+        try
+            ok = erleans_grain:cast(Grain, {observed_cast, self(), Tag, 1}),
+            ok = erleans_grain:cast(Old, {observed_cast, self(), Tag, 2}),
+            %% Timer-origin casts must retain their leave_timer envelope.
+            ok = gen_statem:cast(Old, {leave_timer, {observed_cast, self(), Tag, 3}}),
+            Old ! {Tag, finish_deactivate},
+            receive {'DOWN', Monitor, process, Old, {shutdown, deactivated}} -> ok
+            after 1000 -> ct:fail(grain_not_deactivated)
+            end,
+            Forwarded = [receive {Tag, cast, N, New, State} ->
+                             ?assertEqual(#{value => a}, State),
+                             ?assertNotEqual(Old, New),
+                             {N, New}
+                         after 1000 -> ct:fail(cast_not_forwarded)
+                         end || _ <- [1, 2, 3]],
+            {Sequence, Replacements} = lists:unzip(Forwarded),
+            ?assertEqual([1, 2, 3], Sequence),
+            [Replacement] = lists:usort(Replacements),
+            ?assertEqual(a, erleans_grain:call(Replacement, get)),
+            receive {Tag, cast, _, _, _} -> ct:fail(cast_repeated)
+            after 0 -> ok
+            end,
+            ok = gen_statem:stop(Replacement)
+        after
+            Old ! {Tag, finish_deactivate}
+        end
+    end, [prefer_local, {stateless, 1}]).

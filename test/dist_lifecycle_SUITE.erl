@@ -123,6 +123,7 @@ deactivation_keeps_registration(Peer, Kind) ->
         after 1000 -> ct:fail(deactivation_not_started)
         end,
         assert_registered(Peer, Grain, Pid),
+        ok = erleans_grain:cast(Grain, {observed_cast, Test, Tag, during_deactivate}),
         {Reader, ReaderMonitor} = spawn_monitor(fun() ->
             Test ! {Tag, read, erleans_grain:call(Grain, get)}
         end),
@@ -141,6 +142,7 @@ deactivation_keeps_registration(Peer, Kind) ->
                 assert_registered(Peer, Grain, Pid),
                 ?assertEqual({ok, #{value => a}, <<"version:1">>},
                              opaque_etag_provider:read(etag_test_grain, in_memory, Id)),
+                ok = erleans_grain:cast(Grain, {observed_cast, Test, Tag, during_save}),
                 Pid ! {Tag, finish_save},
                 {saved, <<"version:2">>}
         end,
@@ -155,6 +157,15 @@ deactivation_keeps_registration(Peer, Kind) ->
         end,
         ?assertEqual({ok, #{value => Expected}, Version},
                      opaque_etag_provider:read(etag_test_grain, in_memory, Id)),
+        Casts = case Kind of
+                    no_save -> [during_deactivate];
+                    _ -> [during_deactivate, during_save]
+                end,
+        [receive {Tag, cast, Phase, Replacement, State} ->
+             ?assertNotEqual(Pid, Replacement),
+             ?assertEqual(#{value => Expected}, State)
+         after 1000 -> ct:fail({cast_not_forwarded, Phase})
+         end || Phase <- Casts],
         %% The replacement activation must have the current ETag on its first save.
         ok = erleans_grain:call(Grain, {set, latest}),
         ?assertEqual(latest, erleans_grain:call(Grain, get)),

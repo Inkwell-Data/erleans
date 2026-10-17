@@ -60,6 +60,9 @@ handle_call(save, From, State) ->
 handle_call({set, Value}, From, State) ->
     {ok, State#{value => Value}, [save_state, {reply, From, ok}]}.
 
+handle_cast({observed_cast, Test, Tag, N}, State) ->
+    Test ! {Tag, cast, N, self(), State},
+    {ok, State};
 handle_cast({actions, Candidate, Actions}, _State) -> {ok, Candidate, Actions};
 handle_cast(_, State) -> {ok, State}.
 

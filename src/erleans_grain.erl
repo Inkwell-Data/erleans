@@ -438,6 +438,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 
 terminate({shutdown, deactivated}, _State, #data{ref=GrainRef}) ->
     maybe_remove_worker(GrainRef),
+    forward_queued_casts(GrainRef),
     ok;
 terminate({shutdown, duplicate_activation}, _State, #data{ref=GrainRef}) ->
     %% Ownership belongs to the resolver's winner. Do not save the loser's
@@ -468,6 +469,33 @@ terminate(Reason, _State, #data{ref=GrainRef}) ->
     ok.
 
 %% Internal functions
+
+%% The state has been saved and registration released. Forward the queued
+%% casts in order without making termination wait for a replacement activation.
+forward_queued_casts(GrainRef) ->
+    case queued_casts([]) of
+        [] -> ok;
+        Casts ->
+            spawn(fun() ->
+                lists:foreach(fun(Event) ->
+                    try do_for_ref(GrainRef,
+                            fun(_, Pid) -> gen_statem:cast(Pid, Event) end,
+                            infinity, ?ROUTING_RETRIES)
+                    catch Class:Reason ->
+                        ?LOG_WARNING("at=forward_cast_failed class=~p reason=~p", [Class, Reason])
+                    end
+                end, Casts)
+            end),
+            ok
+    end.
+
+queued_casts(Acc) ->
+    receive
+        {'$gen_cast', {ReqType, _}=Event}
+          when ReqType =:= refresh_timer; ReqType =:= leave_timer ->
+            queued_casts([Event | Acc])
+    after 0 -> lists:reverse(Acc)
+    end.
 
 maybe_add_worker(GrainRef=#{placement := {stateless, _}}) ->
     gproc_pool:add_worker(?pool(GrainRef), self()),

@@ -51,6 +51,11 @@ the remaining call timeout rather than resetting it. Stateless pool waits also
 respect the remaining budget. Calls directly to a PID cannot be re-routed.
 Callback exceptions, request timeouts, storage conflicts, and explicit activation
 errors are not retried. Casts remain asynchronous and do not acknowledge delivery.
+On orderly deactivation, casts already queued in the old activation's mailbox
+are forwarded through the grain reference after saving and releasing ownership.
+Their mailbox order and timer-origin request type are preserved. This is best
+effort: crashes, routing failures, or messages arriving after the mailbox drain
+can still lose casts.
 
 A transport failure can happen after a request has executed but before its reply
 arrives. Retrying that request can repeat side effects; operations which need to
